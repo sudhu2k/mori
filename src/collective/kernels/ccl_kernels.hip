@@ -75,6 +75,22 @@ using namespace mori::collective;
                      args.dstBaseOffset);                                   \
   }
 
+// AllGather async wait: only touches dstMemObj/flagsMemObj/flagVal (no element
+// data), but the args struct is templated on T, so instantiate one per type.
+#define CCL_WRAP_ALLGATHER_ASYNC_WAIT(suffix, T)                              \
+  extern "C" __global__ void OneShotAllGatherSdmaAsyncWaitKernel_##suffix(    \
+      CclAllgatherArgs<T> args) {                                            \
+    OneShotAllGatherSdmaAsyncWaitKernel_body(args.myPe, args.npes,           \
+                                             args.dstMemObj, args.flagsMemObj, \
+                                             args.flagVal);                  \
+  }
+
+// Expand all three allgather kernels (sync, async put, async wait) for a type.
+#define CCL_ALLGATHER_ALL_KERNELS(suffix, T)                                  \
+  CCL_WRAP_ALLGATHER(OneShotAllGatherSdmaKernel, suffix, T)                   \
+  CCL_WRAP_ALLGATHER_ASYNC_PUT(OneShotAllGatherSdmaAsyncPutKernel, suffix, T) \
+  CCL_WRAP_ALLGATHER_ASYNC_WAIT(suffix, T)
+
 // AllReduce reduce-scatter / fused: (myPe, npes, input, dstMemObj,
 //                                    flagsMemObj, barrier, elementCount)
 #define CCL_WRAP_ALLREDUCE_RS(kernel, suffix, T)                              \
@@ -141,17 +157,19 @@ extern "C" __global__ void OneShotAll2allSdmaAsyncWaitKernel_u32(
 }
 
 // ============================================================================
-// AllGather instantiations (uint32_t)
+// AllGather instantiations (uint32_t, float, __half, hip_bfloat16)
+//
+// The SDMA copy engine on MI300X performs byte-granular linear copies, so the
+// kernels are fully byte-addressed and correct for any element type. Typed
+// instantiations let the host pass the real element count (no uint32 rounding),
+// which is required for bf16/fp16 shards whose byte length is not a multiple of
+// 4 (odd element counts).
 // ============================================================================
 
-CCL_WRAP_ALLGATHER(OneShotAllGatherSdmaKernel, u32, uint32_t)
-CCL_WRAP_ALLGATHER_ASYNC_PUT(OneShotAllGatherSdmaAsyncPutKernel, u32, uint32_t)
-
-extern "C" __global__ void OneShotAllGatherSdmaAsyncWaitKernel_u32(
-    CclAllgatherArgs<uint32_t> args) {
-  OneShotAllGatherSdmaAsyncWaitKernel_body(args.myPe, args.npes, args.dstMemObj,
-                                           args.flagsMemObj, args.flagVal);
-}
+CCL_ALLGATHER_ALL_KERNELS(u32, uint32_t)
+CCL_ALLGATHER_ALL_KERNELS(f32, float)
+CCL_ALLGATHER_ALL_KERNELS(f16, __half)
+CCL_ALLGATHER_ALL_KERNELS(bf16, hip_bfloat16)
 
 // ============================================================================
 // AllReduce instantiations (uint32_t, int32_t, float, __half, hip_bfloat16)

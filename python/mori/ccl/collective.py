@@ -221,6 +221,24 @@ class All2allSdma:
 # ---------------------------------------------------------------------------
 
 
+# Allgather supports the legacy uint32 reinterpret path plus typed handles.
+# Typed handles take the real element count (no uint32 rounding), which is
+# required for bf16/fp16 shards whose byte length is not a multiple of 4.
+_ALLGATHER_DTYPE_TO_SUFFIX = {
+    torch.uint32: "u32",
+    torch.float32: "f32",
+    torch.float16: "f16",
+    torch.bfloat16: "bf16",
+}
+
+_ALLGATHER_HANDLE_MAP = {
+    torch.uint32: "AllgatherSdmaHandle",
+    torch.float32: "AllgatherSdmaHandleFp32",
+    torch.float16: "AllgatherSdmaHandleFp16",
+    torch.bfloat16: "AllgatherSdmaHandleBf16",
+}
+
+
 class AllgatherSdma:
     def __init__(
         self,
@@ -230,12 +248,21 @@ class AllgatherSdma:
         output_buffer_size: Optional[int] = None,
         transit_buffer_size: Optional[int] = None,
         copy_output_to_user: bool = True,
+        dtype: torch.dtype = torch.uint32,
     ):
         _require_sdma_env("AllgatherSdma")
         _ensure_ccl_jit()
         self.my_pe = my_pe
         self.npes = npes
-        handle_class = getattr(mori_cpp, "AllgatherSdmaHandle")
+        self.dtype = dtype
+        self._type_suffix = _ALLGATHER_DTYPE_TO_SUFFIX.get(dtype)
+        if self._type_suffix is None:
+            raise ValueError(
+                f"Unsupported dtype {dtype}. Supported: "
+                f"{list(_ALLGATHER_DTYPE_TO_SUFFIX.keys())}"
+            )
+        handle_name = _ALLGATHER_HANDLE_MAP[dtype]
+        handle_class = getattr(mori_cpp, handle_name)
 
         if input_buffer_size is not None and output_buffer_size is not None:
             self._handle = handle_class(
@@ -250,39 +277,48 @@ class AllgatherSdma:
                 my_pe, npes, 512 * 1024 * 1024, copy_output_to_user
             )
 
+    def _handle_count(self, input_data, count: int) -> int:
+        # Legacy uint32 handle: reinterpret the input bytes as uint32 words
+        # (rounding up). Typed handles take the element count directly.
+        if self.dtype == torch.uint32:
+            byte_count = count * input_data.element_size()
+            return (byte_count + 3) // 4
+        return count
+
     def __call__(self, input_data, output_data, count: int, stream=None) -> bool:
-        byte_count = count * input_data.element_size()
-        u32_count = (byte_count + 3) // 4
+        n = self._handle_count(input_data, count)
         s = _stream_to_int(stream)
         args = self._handle.prepare_sync(
-            input_data.data_ptr(), output_data.data_ptr(), u32_count, s
+            input_data.data_ptr(), output_data.data_ptr(), n, s
         )
-        _get_ccl_func("OneShotAllGatherSdmaKernel_u32").launch_struct(
+        _get_ccl_func(f"OneShotAllGatherSdmaKernel_{self._type_suffix}").launch_struct(
             (1,), (512,), 0, s, args
         )
-        self._handle.finish_sync(output_data.data_ptr(), u32_count, s)
+        self._handle.finish_sync(output_data.data_ptr(), n, s)
         return True
 
     def start_async(self, input_data, output_data, count: int, stream=None) -> bool:
-        byte_count = count * input_data.element_size()
-        u32_count = (byte_count + 3) // 4
+        n = self._handle_count(input_data, count)
         s = _stream_to_int(stream)
         args = self._handle.prepare_async_start(
-            input_data.data_ptr(), output_data.data_ptr(), u32_count, s
+            input_data.data_ptr(), output_data.data_ptr(), n, s
         )
-        _get_ccl_func("OneShotAllGatherSdmaAsyncPutKernel_u32").launch_struct(
-            (1,), (512,), 0, s, args
-        )
+        _get_ccl_func(
+            f"OneShotAllGatherSdmaAsyncPutKernel_{self._type_suffix}"
+        ).launch_struct((1,), (512,), 0, s, args)
         self._handle.after_async_start()
         return True
 
-    def wait_async(self, stream=None) -> float:
+    def wait_async(self, stream=None, blocking: bool = True) -> float:
         s = _stream_to_int(stream)
         args = self._handle.prepare_async_wait(s)
-        _get_ccl_func("OneShotAllGatherSdmaAsyncWaitKernel_u32").launch_struct(
-            (1,), (64,), 0, s, args
-        )
-        return self._handle.finish_async_wait(s)
+        _get_ccl_func(
+            f"OneShotAllGatherSdmaAsyncWaitKernel_{self._type_suffix}"
+        ).launch_struct((1,), (64,), 0, s, args)
+        # When blocking=False, the wait kernel and the transit->output copy are left
+        # enqueued on the stream without a host synchronize, so the gather stays truly
+        # async; the caller observes completion via a CUDA event on the stream.
+        return self._handle.finish_async_wait(s, blocking)
 
     def is_async_in_progress(self) -> bool:
         return self._handle.is_async_in_progress()
@@ -294,7 +330,7 @@ class AllgatherSdma:
         self._handle.reset_flags()
 
     def get_output_transit_buffer(self, dtype=None, device=None):
-        dtype, device = _resolve_transit_view_args(dtype, device, torch.uint32)
+        dtype, device = _resolve_transit_view_args(dtype, device, self.dtype)
         ptr, size_bytes = self._handle.get_output_transit_buffer()
         return _ptr_to_tensor(ptr, size_bytes, dtype, device)
 

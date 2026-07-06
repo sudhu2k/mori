@@ -22,6 +22,9 @@
 
 #include "mori/collective/allgather/oneshot_allgather_sdma_class.hpp"
 
+#include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
+
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -479,36 +482,49 @@ int64_t AllgatherSdma<T>::prepare_async_wait(hipStream_t stream) {
 }
 
 template <typename T>
-double AllgatherSdma<T>::finish_async_wait(hipStream_t stream) {
+double AllgatherSdma<T>::finish_async_wait(hipStream_t stream, bool blocking) {
   if (!async_in_progress_) {
     throw std::runtime_error("No async operation in progress");
   }
 
   hipStream_t wait_stream = (stream != nullptr) ? stream : async_stream_;
 
-  if (wait_stream != nullptr) {
-    hipError_t err = hipStreamSynchronize(wait_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "PE %d: Stream synchronization failed: %s\n", myPe_, hipGetErrorString(err));
-      cancel_async();
-      throw std::runtime_error("Stream synchronization failed");
-    }
-  } else {
-    hipError_t err = hipDeviceSynchronize();
-    if (err != hipSuccess) {
-      fprintf(stderr, "PE %d: Device synchronization failed: %s\n", myPe_, hipGetErrorString(err));
-      cancel_async();
-      throw std::runtime_error("Device synchronization failed");
+  // Legacy blocking behavior: host-synchronize so the gather (and the
+  // transit->output copy below) is guaranteed complete on return. When non-blocking,
+  // we skip every host synchronize -- the wait kernel and the copy are already
+  // enqueued on ``wait_stream`` and stay correctly ordered there, and the caller is
+  // responsible for observing completion (e.g. a CUDA event recorded on the stream).
+  if (blocking) {
+    if (wait_stream != nullptr) {
+      hipError_t err = hipStreamSynchronize(wait_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "PE %d: Stream synchronization failed: %s\n", myPe_,
+                hipGetErrorString(err));
+        cancel_async();
+        throw std::runtime_error("Stream synchronization failed");
+      }
+    } else {
+      hipError_t err = hipDeviceSynchronize();
+      if (err != hipSuccess) {
+        fprintf(stderr, "PE %d: Device synchronization failed: %s\n", myPe_,
+                hipGetErrorString(err));
+        cancel_async();
+        throw std::runtime_error("Device synchronization failed");
+      }
     }
   }
 
   bool direct = find_registered(async_output_).first.IsValid();
   if (!direct && copy_output_to_user_) {
+    // Enqueue the transit->output copy on the stream. It is ordered after the wait
+    // kernel on the same stream, so it is safe whether or not we synchronize.
     copy_output_to_user(async_output_, async_total_count_, wait_stream);
-    if (wait_stream != nullptr) {
-      (void)hipStreamSynchronize(wait_stream);
-    } else {
-      (void)hipDeviceSynchronize();
+    if (blocking) {
+      if (wait_stream != nullptr) {
+        (void)hipStreamSynchronize(wait_stream);
+      } else {
+        (void)hipDeviceSynchronize();
+      }
     }
   }
 
@@ -545,6 +561,8 @@ template class AllgatherSdma<int32_t>;
 template class AllgatherSdma<int64_t>;
 template class AllgatherSdma<float>;
 template class AllgatherSdma<double>;
+template class AllgatherSdma<__half>;
+template class AllgatherSdma<hip_bfloat16>;
 
 }  // namespace collective
 }  // namespace mori
