@@ -211,6 +211,8 @@ void RegisterMoriIo(pybind11::module_& m) {
            py::call_guard<py::gil_scoped_release>())
       .def("Read", &mori::io::IOEngine::Read, py::call_guard<py::gil_scoped_release>())
       .def("BatchRead", &mori::io::IOEngine::BatchRead, py::call_guard<py::gil_scoped_release>())
+      .def("BatchReadStrided", &mori::io::IOEngine::BatchReadStrided,
+           py::call_guard<py::gil_scoped_release>())
       .def("Write", &mori::io::IOEngine::Write, py::call_guard<py::gil_scoped_release>())
       .def("BatchWrite", &mori::io::IOEngine::BatchWrite, py::call_guard<py::gil_scoped_release>())
       .def("CreateSession", &mori::io::IOEngine::CreateSession)

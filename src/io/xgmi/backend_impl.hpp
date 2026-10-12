@@ -57,6 +57,13 @@ class XgmiBackendSession : public BackendSession {
                       const SizeVec& sizes, TransferStatus* status, TransferUniqueId id,
                       bool isRead) override;
 
+  // Contiguous entries go as in BatchReadWrite (without the scatter/gather kernel),
+  // each strided entry as one hipMemcpy2DAsync, all on one stream.
+  void BatchReadWriteStrided(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
+                             const SizeVec& sizes, const SizeVec& rows,
+                             const SizeVec& localPitches, const SizeVec& remotePitches,
+                             TransferStatus* status, TransferUniqueId id, bool isRead);
+
   bool Alive() const override;
 
  private:
@@ -91,6 +98,11 @@ class XgmiBackend : public Backend {
                       const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
                       const SizeVec& sizes, TransferStatus* status, TransferUniqueId id,
                       bool isRead) override;
+  void BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
+                             const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
+                             const SizeVec& sizes, const SizeVec& rows,
+                             const SizeVec& localPitches, const SizeVec& remotePitches,
+                             TransferStatus* status, TransferUniqueId id, bool isRead) override;
   BackendSession* CreateSession(const MemoryDesc& local, const MemoryDesc& remote) override;
   bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id,
                                 TransferStatus* status) override;

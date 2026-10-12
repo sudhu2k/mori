@@ -102,6 +102,13 @@ class IOEngine {
                   const MemDescVec& remoteDest, const BatchSizeVec& remoteOffsets,
                   const BatchSizeVec& sizes, TransferStatusPtrVec& status,
                   TransferUniqueIdVec& ids);
+  // BatchRead where entry j of batch i is rows[i][j] rows of sizes[i][j] bytes, rows
+  // localPitches[i][j] bytes apart locally and remotePitches[i][j] remotely.
+  void BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec& localOffsets,
+                        const MemDescVec& remoteSrc, const BatchSizeVec& remoteOffsets,
+                        const BatchSizeVec& sizes, const BatchSizeVec& rows,
+                        const BatchSizeVec& localPitches, const BatchSizeVec& remotePitches,
+                        TransferStatusPtrVec& status, TransferUniqueIdVec& ids);
   // Take the transfer status of an inbound op
   bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id, TransferStatus* status);
   // Wait for all statuses with failure-wins precedence. Empty input succeeds.

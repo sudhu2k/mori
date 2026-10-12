@@ -217,6 +217,33 @@ class IOEngine:
     def batch_read(self, *args):
         return self._batch_single_side_transfer(self._engine.BatchRead, *args)
 
+    def batch_read_strided(
+        self,
+        local_dest_mem_desc,
+        local_offsets,
+        remote_src_mem_desc,
+        remote_offsets,
+        sizes,
+        rows,
+        local_pitches,
+        remote_pitches,
+        transfer_uid,
+    ):
+        transfer_status = [mori_cpp.TransferStatus() for _ in range(len(sizes))]
+        self._engine.BatchReadStrided(
+            local_dest_mem_desc,
+            local_offsets,
+            remote_src_mem_desc,
+            remote_offsets,
+            sizes,
+            rows,
+            local_pitches,
+            remote_pitches,
+            transfer_status,
+            transfer_uid,
+        )
+        return transfer_status
+
     def batch_write(self, *args):
         return self._batch_single_side_transfer(self._engine.BatchWrite, *args)
 

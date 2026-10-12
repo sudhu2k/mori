@@ -527,6 +527,39 @@ void IOEngine::BatchRead(const MemDescVec& localDest, const BatchSizeVec& localO
   }
 }
 
+void IOEngine::BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec& localOffsets,
+                                const MemDescVec& remoteSrc, const BatchSizeVec& remoteOffsets,
+                                const BatchSizeVec& sizes, const BatchSizeVec& rows,
+                                const BatchSizeVec& localPitches,
+                                const BatchSizeVec& remotePitches, TransferStatusPtrVec& status,
+                                TransferUniqueIdVec& ids) {
+  MORI_IO_FUNCTION_TIMER;
+  size_t batchSize = localDest.size();
+  assert(batchSize == remoteSrc.size());
+  assert(batchSize == localOffsets.size());
+  assert(batchSize == remoteOffsets.size());
+  assert(batchSize == sizes.size());
+  assert(batchSize == rows.size());
+  assert(batchSize == localPitches.size());
+  assert(batchSize == remotePitches.size());
+  assert(batchSize == status.size());
+  assert(batchSize == ids.size());
+
+  for (size_t i = 0; i < batchSize; i++) {
+    std::shared_ptr<internal::IoCallDiagnostics> diagnostics;
+    internal::ScopedIoCallDiagnosticsCapture capture(&diagnostics, "Engine strided batch read");
+    Backend* backend = nullptr;
+    SELECT_BACKEND_AND_RETURN_IF_NONE(localDest[i], remoteSrc[i], status[i], backend);
+    backend->BatchReadWriteStrided(localDest[i], localOffsets[i], remoteSrc[i], remoteOffsets[i],
+                                   sizes[i], rows[i], localPitches[i], remotePitches[i],
+                                   status[i], ids[i], true);
+    if (status[i]->Failed()) {
+      LogTransferFailure(diagnostics, "Engine strided batch read error {} message {}",
+                         status[i]->CodeUint32(), status[i]->Message());
+    }
+  }
+}
+
 void IOEngine::BatchWrite(const MemDescVec& localSrc, const BatchSizeVec& localOffsets,
                           const MemDescVec& remoteDest, const BatchSizeVec& remoteOffsets,
                           const BatchSizeVec& sizes, TransferStatusPtrVec& status,

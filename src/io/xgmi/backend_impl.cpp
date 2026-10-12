@@ -161,6 +161,44 @@ struct TransferCompletion {
   }
 };
 
+struct MergedSeg {
+  size_t localOff;
+  size_t remoteOff;
+  size_t sz;
+};
+
+// Sort by remote offset and merge entries that continue each other on both sides.
+std::vector<MergedSeg> MergeSegments(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
+                                     const SizeVec& sizes) {
+  size_t batchSize = sizes.size();
+  std::vector<size_t> indices(batchSize);
+  std::iota(indices.begin(), indices.end(), 0);
+  if (!std::is_sorted(remoteOffsets.begin(), remoteOffsets.end())) {
+    std::sort(indices.begin(), indices.end(),
+              [&](size_t a, size_t b) { return remoteOffsets[a] < remoteOffsets[b]; });
+  }
+
+  std::vector<MergedSeg> segments;
+  segments.reserve(batchSize);
+
+  for (size_t i = 0; i < batchSize; ++i) {
+    size_t idx = indices[i];
+    if (sizes[idx] == 0) continue;
+
+    if (!segments.empty()) {
+      MergedSeg& last = segments.back();
+      bool localContig = (last.localOff + last.sz) == localOffsets[idx];
+      bool remoteContig = (last.remoteOff + last.sz) == remoteOffsets[idx];
+      if (localContig && remoteContig) {
+        last.sz += sizes[idx];
+        continue;
+      }
+    }
+    segments.push_back({localOffsets[idx], remoteOffsets[idx], sizes[idx]});
+  }
+  return segments;
+}
+
 void ArmTransferCompletion(TransferStatus* status, hipEvent_t event, int eventDevice,
                            EventPool* eventPool, std::function<void()> cleanup = {}) {
   auto completion = std::make_shared<TransferCompletion>();
@@ -291,37 +329,7 @@ void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
     return;
   }
 
-  // Sort indices by remote offset to maximize contiguous-run merging
-  std::vector<size_t> indices(batchSize);
-  std::iota(indices.begin(), indices.end(), 0);
-  if (!std::is_sorted(remoteOffsets.begin(), remoteOffsets.end())) {
-    std::sort(indices.begin(), indices.end(),
-              [&](size_t a, size_t b) { return remoteOffsets[a] < remoteOffsets[b]; });
-  }
-
-  struct MergedSeg {
-    size_t localOff;
-    size_t remoteOff;
-    size_t sz;
-  };
-  std::vector<MergedSeg> segments;
-  segments.reserve(batchSize);
-
-  for (size_t i = 0; i < batchSize; ++i) {
-    size_t idx = indices[i];
-    if (sizes[idx] == 0) continue;
-
-    if (!segments.empty()) {
-      MergedSeg& last = segments.back();
-      bool localContig = (last.localOff + last.sz) == localOffsets[idx];
-      bool remoteContig = (last.remoteOff + last.sz) == remoteOffsets[idx];
-      if (localContig && remoteContig) {
-        last.sz += sizes[idx];
-        continue;
-      }
-    }
-    segments.push_back({localOffsets[idx], remoteOffsets[idx], sizes[idx]});
-  }
+  std::vector<MergedSeg> segments = MergeSegments(localOffsets, remoteOffsets, sizes);
 
   if (segments.empty()) {
     status->SetCode(StatusCode::SUCCESS);
@@ -456,6 +464,98 @@ void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
   ArmTransferCompletion(status, event, eventDevice, eventPool);
   MORI_IO_TRACE("XGMI: Batch transfer via hipMemcpy, id={}, segments={}, isRead={}", id,
                 segments.size(), isRead);
+}
+
+void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
+                                               const SizeVec& remoteOffsets, const SizeVec& sizes,
+                                               const SizeVec& rows, const SizeVec& localPitches,
+                                               const SizeVec& remotePitches,
+                                               TransferStatus* status, TransferUniqueId id,
+                                               bool isRead) {
+  size_t batchSize = sizes.size();
+  assert(batchSize == localOffsets.size());
+  assert(batchSize == remoteOffsets.size());
+  assert(batchSize == rows.size());
+  assert(batchSize == localPitches.size());
+  assert(batchSize == remotePitches.size());
+
+  SizeVec lo, ro, sz;
+  std::vector<size_t> strided;
+  for (size_t i = 0; i < batchSize; ++i) {
+    if (sizes[i] == 0 || rows[i] == 0) continue;
+    if (rows[i] == 1 || (localPitches[i] == sizes[i] && remotePitches[i] == sizes[i])) {
+      lo.push_back(localOffsets[i]);
+      ro.push_back(remoteOffsets[i]);
+      sz.push_back(sizes[i] * rows[i]);
+    } else {
+      strided.push_back(i);
+    }
+  }
+  if (strided.empty()) {
+    BatchReadWrite(lo, ro, sz, status, id, isRead);
+    return;
+  }
+
+  ScopedHipDeviceGuard deviceGuard;
+  const int srcDevice = isRead ? remoteDevice : localDevice;
+  const int dstDevice = isRead ? localDevice : remoteDevice;
+  // remoteAddr was IPC-opened in localDevice's context, as for the scatter/gather kernel.
+  const int copyDevice = (isIpcSession && !isRead) ? localDevice : dstDevice;
+
+  hipError_t err = hipSetDevice(copyDevice);
+  if (err != hipSuccess) {
+    status->Update(StatusCode::ERR_GPU_OP,
+                   std::string("XGMI: Failed to set device: ") + hipGetErrorString(err));
+    return;
+  }
+  hipStream_t stream = streamPool->GetNextStream(copyDevice);
+  hipEvent_t event = eventPool->GetEvent(copyDevice);
+  if (stream == nullptr || event == nullptr) {
+    status->Update(StatusCode::ERR_BAD_STATE, "XGMI: Failed to get stream or event from pool");
+    if (event != nullptr) {
+      eventPool->PutEvent(event, copyDevice);
+    }
+    return;
+  }
+
+  auto fail = [&](const char* what) {
+    status->Update(StatusCode::ERR_GPU_OP, std::string("XGMI: ") + what +
+                                               " failed: " + hipGetErrorString(err));
+    eventPool->PutEvent(event, copyDevice);
+  };
+
+  for (const auto& seg : MergeSegments(lo, ro, sz)) {
+    void* src = isRead ? static_cast<char*>(remoteAddr) + seg.remoteOff
+                       : static_cast<char*>(localAddr) + seg.localOff;
+    void* dst = isRead ? static_cast<char*>(localAddr) + seg.localOff
+                       : static_cast<char*>(remoteAddr) + seg.remoteOff;
+    if (srcDevice == dstDevice) {
+      err = hipMemcpyAsync(dst, src, seg.sz, hipMemcpyDeviceToDevice, stream);
+    } else {
+      err = hipMemcpyPeerAsync(dst, dstDevice, src, srcDevice, seg.sz, stream);
+    }
+    if (err != hipSuccess) return fail("memcpy");
+  }
+
+  for (size_t i : strided) {
+    char* local = static_cast<char*>(localAddr) + localOffsets[i];
+    char* remote = static_cast<char*>(remoteAddr) + remoteOffsets[i];
+    void* dst = isRead ? local : remote;
+    const void* src = isRead ? remote : local;
+    size_t dpitch = isRead ? localPitches[i] : remotePitches[i];
+    size_t spitch = isRead ? remotePitches[i] : localPitches[i];
+    err = hipMemcpy2DAsync(dst, dpitch, src, spitch, sizes[i], rows[i], hipMemcpyDeviceToDevice,
+                           stream);
+    if (err != hipSuccess) return fail("hipMemcpy2DAsync");
+  }
+
+  err = hipEventRecord(event, stream);
+  if (err != hipSuccess) return fail("hipEventRecord");
+
+  status->SetCode(StatusCode::IN_PROGRESS);
+  ArmTransferCompletion(status, event, copyDevice, eventPool);
+  MORI_IO_TRACE("XGMI: Strided batch transfer, id={}, contiguous={}, strided={}, isRead={}", id,
+                sz.size(), strided.size(), isRead);
 }
 
 bool XgmiBackendSession::Alive() const { return true; }
@@ -911,6 +1011,22 @@ void XgmiBackend::BatchReadWrite(const MemoryDesc& localDest, const SizeVec& loc
   }
 
   sess->BatchReadWrite(localOffsets, remoteOffsets, sizes, status, id, isRead);
+}
+
+void XgmiBackend::BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
+                                        const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
+                                        const SizeVec& sizes, const SizeVec& rows,
+                                        const SizeVec& localPitches,
+                                        const SizeVec& remotePitches, TransferStatus* status,
+                                        TransferUniqueId id, bool isRead) {
+  XgmiBackendSession* sess = GetOrCreateSessionCached(localDest, remoteSrc);
+  if (sess == nullptr) {
+    status->Update(StatusCode::ERR_BAD_STATE, "XGMI: Failed to create session");
+    return;
+  }
+
+  sess->BatchReadWriteStrided(localOffsets, remoteOffsets, sizes, rows, localPitches,
+                              remotePitches, status, id, isRead);
 }
 
 BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const MemoryDesc& remote) {
