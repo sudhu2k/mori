@@ -487,6 +487,12 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
       lo.push_back(localOffsets[i]);
       ro.push_back(remoteOffsets[i]);
       sz.push_back(sizes[i] * rows[i]);
+    } else if (sizes[i] >= config.strided2dMaxRow) {
+      for (size_t r = 0; r < rows[i]; ++r) {
+        lo.push_back(localOffsets[i] + r * localPitches[i]);
+        ro.push_back(remoteOffsets[i] + r * remotePitches[i]);
+        sz.push_back(sizes[i]);
+      }
     } else {
       strided.push_back(i);
     }

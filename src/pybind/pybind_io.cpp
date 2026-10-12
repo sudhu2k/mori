@@ -94,9 +94,16 @@ void RegisterMoriIo(pybind11::module_& m) {
       .def_readwrite("max_msg_sge", &mori::io::RdmaBackendConfig::maxMsgSge);
 
   py::class_<mori::io::XgmiBackendConfig, mori::io::BackendConfig>(m, "XgmiBackendConfig")
-      .def(py::init<int, int>(), py::arg("num_streams") = 64, py::arg("num_events") = 64)
+      .def(py::init([](int numStreams, int numEvents, size_t strided2dMaxRow) {
+             mori::io::XgmiBackendConfig c(numStreams, numEvents);
+             c.strided2dMaxRow = strided2dMaxRow;
+             return c;
+           }),
+           py::arg("num_streams") = 64, py::arg("num_events") = 64,
+           py::arg("strided_2d_max_row") = 64 << 10)
       .def_readwrite("num_streams", &mori::io::XgmiBackendConfig::numStreams)
-      .def_readwrite("num_events", &mori::io::XgmiBackendConfig::numEvents);
+      .def_readwrite("num_events", &mori::io::XgmiBackendConfig::numEvents)
+      .def_readwrite("strided_2d_max_row", &mori::io::XgmiBackendConfig::strided2dMaxRow);
 
   py::class_<mori::io::FabricBackendConfig, mori::io::BackendConfig>(m, "FabricBackendConfig")
       .def(py::init<int, int>(), py::arg("num_streams") = 64, py::arg("num_events") = 64)

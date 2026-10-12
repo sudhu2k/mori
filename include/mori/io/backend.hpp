@@ -95,10 +95,14 @@ struct XgmiBackendConfig : public BackendConfig {
 
   int numStreams{64};
   int numEvents{64};
+  // Strided batch entries with shorter rows are one hipMemcpy2DAsync each; longer rows
+  // are copied row by row (few rows, each long enough for a copy engine).
+  size_t strided2dMaxRow{64 << 10};
 };
 
 inline std::ostream& operator<<(std::ostream& os, const XgmiBackendConfig& c) {
-  return os << "numStreams[" << c.numStreams << "] numEvents[" << c.numEvents << "]";
+  return os << "numStreams[" << c.numStreams << "] numEvents[" << c.numEvents
+            << "] strided2dMaxRow[" << c.strided2dMaxRow << "]";
 }
 
 struct FabricBackendConfig : public BackendConfig {
