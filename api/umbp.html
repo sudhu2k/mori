@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>UMBP Master Client &mdash; MORI 0.1.0 documentation</title>
+  <title>UMBP Master Client &mdash; MORI development (7cba7e19) documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../_static/jquery.js?v=5d32c60e"></script>
       <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../_static/documentation_options.js?v=a4a3e833"></script>
       <script src="../_static/doctools.js?v=9bcbadda"></script>
       <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../_static/js/theme.js"></script>
@@ -43,24 +43,37 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../installation.html#requirements">Requirements</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../installation.html#installation-methods">Installation Methods</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../installation.html#from-source">From Source</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Install MORI</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#installation">Installation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#validate-the-environment">Validate the environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#install">Install</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../installation.html#from-pypi-stable-release">From PyPI (stable release)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../installation.html#nightly-pre-built-tested-daily">Nightly (pre-built, tested daily)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../installation.html#from-source">From source</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../installation.html#environment-variables">Environment Variables</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../installation.html#verification">Verification</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../installation.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#verify-installation">Verify installation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#optional-flydsl-integration">Optional FlyDSL integration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#next-steps">Next steps</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#runnable-checks">Runnable checks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#api-sketches">API sketches</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#mori-ep-dispatch-and-combine">MORI-EP: Dispatch and Combine</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#mori-io-point-to-point-transfers">MORI-IO: Point-to-Point Transfers</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#mori-shmem-symmetric-memory">MORI Shmem: Symmetric Memory</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#mori-ir-device-bitcode-for-gpu-kernels">MORI-IR: Device Bitcode for GPU Kernels</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#profiling-with-mori-viz">Profiling with MORI-VIZ</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../ep_backends.html">Choosing an EP API and backend</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../ep_backends.html#epv2-configuration-and-lifecycle">EPv2 configuration and lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../ep_backends.html#validation-before-tuning">Validation before tuning</a></li>
 </ul>
 </li>
 </ul>
@@ -152,6 +165,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../MORI-SHMEM-GUIDE.html#hip-module-init-triton-integration">7. HIP Module Init (Triton Integration)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-SHMEM-GUIDE.html#initialization-flags">8. Initialization Flags</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-SHMEM-GUIDE.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-SHMEM-GUIDE.html#rail-only-connections">Rail-only connections</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-SHMEM-GUIDE.html#source-files">Source Files</a></li>
 </ul>
 </li>
@@ -211,7 +225,21 @@
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#python-api-quick-reference">Python API Quick Reference</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#example-basic-read-write">Example: Basic Read/Write</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#environment-configuration">Environment &amp; Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#profiling-mori-io-with-roctx-markers">Profiling MORI-IO with ROCTX Markers</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html">MORI UMBP Single-Node Smoke Test</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#configuration-inputs">Configuration Inputs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#script-constants">Script constants</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#runtime-environment-variables">Runtime environment variables</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#launch-steps">Launch Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#core-dumps">Core Dumps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#troubleshooting">Troubleshooting</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="../PROFILER.html">MORI-VIZ (Visualizer)</a><ul>
@@ -262,9 +290,33 @@
 </li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html">MORI GEMM + All-Reduce Benchmark</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#summary">Summary</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#running-the-benchmark">Running the benchmark</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#modes-and-quantisation">Modes and quantisation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#the-fp8-wire-s-knobs">The fp8 wire’s knobs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#the-gemm-on-its-own">The GEMM on its own</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#measurement-discipline">Measurement discipline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#reproducing-the-end-to-end-numbers">Reproducing the end-to-end numbers</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="../MORI-IO-BENCHMARK.html">MORI-IO Benchmark</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#table-of-contents">Table of Contents</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#benchmark-commands">Benchmark Commands</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#which-benchmark-to-use">Which benchmark to use</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#c-benchmark-default-nixlbench-matching">C++ Benchmark (default, nixlbench-matching)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#build">Build</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#run-two-nodes">Run (two nodes)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#sweep-modes">Sweep modes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#differences-from-the-python-flags">Differences from the Python flags</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#python-benchmark">Python Benchmark</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#fabric-cross-node-scale-up-ualink-super-node">Fabric (cross-node scale-up UALink super-node)</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#benchmark-arguments">Benchmark Arguments</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#results-thor2-rdma-read">Results: Thor2 RDMA Read</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#results-thor2-rdma-write">Results: Thor2 RDMA Write</a><ul>
@@ -277,6 +329,139 @@
 <li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#read">Read</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#benchmark-tuning-guide">Benchmark Tuning Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#recommended-starting-config">Recommended starting config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#parameters-that-help">Parameters that help</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#the-merged-wr-size-limit">The merged-WR size limit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#parameters-that-usually-do-not-help-or-can-hurt">Parameters that usually do not help (or can hurt)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-BENCHMARK.html#host-cpu-vs-gpu-memory">Host (CPU) vs GPU memory</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html">MORI UMBP PD Disaggregation Benchmark</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#topology">Topology</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#configuration">Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-1-start-docker-on-all-nodes">Step 1 — Start Docker on all nodes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-2-start-grafana-and-prometheus">Step 2 — Start Grafana and Prometheus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-3-build-mori-on-all-nodes">Step 3 — Build mori on all nodes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-4-create-launcher-scripts">Step 4 — Create launcher scripts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-5-kill-stale-processes-and-launch-prefill">Step 5 — Kill stale processes and launch prefill</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-6-wait-for-all-prefills-ready">Step 6 — Wait for ALL prefills ready</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-7-launch-decode-and-benchmark">Step 7 — Launch decode and benchmark</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-8-monitor-decode-and-benchmark">Step 8 — Monitor decode and benchmark</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#step-9-show-results">Step 9 — Show results</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#teardown">Teardown</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#environment-variable-reference">Environment Variable Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#topology-this-guide-s-wrapper-variables">Topology (this guide’s wrapper variables)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#umbp-mori-consumed-by-run-pd-disagg-bench-dp8ep8-sh">UMBP / mori (consumed by <code class="docutils literal notranslate"><span class="pre">run_pd_disagg_bench_dp8ep8.sh</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-PD-BENCHMARK.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html">UMBP Distributed Tier-Management Benchmark</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#build">Build</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#run-generate-and-replay">Run, generate, and replay</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#json-backend-and-tier-policy">JSON backend and tier policy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#synthetic-profiles">Synthetic profiles</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#trace-contract">Trace contract</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../UMBP-TIER-MANAGEMENT-BENCHMARK.html#results">Results</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../rdma_bandwidth_utilization.html">RDMA Bandwidth Utilization in Dispatch/Combine Kernels</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#kernel-execution-path">Kernel Execution Path</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#what-rdma-actually-transfers">What RDMA Actually Transfers</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#dispatch-send-dispatchinternodesend-dispatchinternodellsend">Dispatch send (<code class="docutils literal notranslate"><span class="pre">DispatchInterNodeSend</span></code> / <code class="docutils literal notranslate"><span class="pre">DispatchInterNodeLLSend</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#combine-send-combineinternodetyped-combineinternodelltyped">Combine send (<code class="docutils literal notranslate"><span class="pre">CombineInterNodeTyped</span></code> / <code class="docutils literal notranslate"><span class="pre">CombineInterNodeLLTyped</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#theoretical-peak-vs-observed-throughput">Theoretical Peak vs. Observed Throughput</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#computing-theoretical-peak">Computing theoretical peak</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#understanding-the-receive-side-timing">Understanding the receive-side timing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#how-to-check-rdma-bandwidth-from-the-trace">How to Check RDMA Bandwidth from the Trace</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#step-1-collect-a-profiler-trace">Step 1: Collect a profiler trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#step-2-read-key-durations-from-the-text-summary">Step 2: Read key durations from the text summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#step-3-compute-observed-rdma-bandwidth">Step 3: Compute observed RDMA bandwidth</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#step-4-interpret-results">Step 4: Interpret results</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#key-tuning-parameters-that-affect-rdma-utilization">Key Tuning Parameters That Affect RDMA Utilization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../rdma_bandwidth_utilization.html#v1-vs-v1-ll-low-latency-tradeoff">v1 vs. v1_ll (low-latency) tradeoff</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#sanity-checks-from-hardware-counters-optional">Sanity Checks from Hardware Counters (optional)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../rdma_bandwidth_utilization.html#summary">Summary</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../MORI_IR_INTEGRATION.html">Mori IR Integration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html">MORI JIT Compilation Framework</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#quick-start">Quick Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#architecture-overview">Architecture Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#packaging-how-wheel-installs-support-jit">Packaging: How Wheel Installs Support JIT</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#compilation-split-host-cxx-vs-device-jit">Compilation Split: Host CXX vs Device JIT</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#what-compiles-as-cxx-at-pip-install-time">What compiles as CXX (at <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span></code> time)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#what-compiles-as-hip-runtime-jit-only">What compiles as HIP (runtime JIT only)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#template-args-vs-raw-args">Template Args vs Raw Args</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#what-gets-jit-compiled">What Gets JIT-Compiled</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#kernel-launch-flow">Kernel Launch Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#hip-driver-api-python-ctypes">HIP Driver API (Python ctypes)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#triton-integration">Triton Integration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#cache-structure">Cache Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#testing">Testing</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#docker-environment">Docker Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#non-editable-install-wheel">1. Non-Editable Install (Wheel)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#editable-install-development">2. Editable Install (Development)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#pre-compile-all-kernels">3. Pre-compile All Kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#verify-jit-configuration">4. Verify JIT Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#verify-compilation-separation">5. Verify Compilation Separation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#dispatch-combine-correctness">6. Dispatch/Combine Correctness</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#dispatch-combine-benchmark">7. Dispatch/Combine Benchmark</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#shmem-api">8. Shmem API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#id1">9. Triton Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#full-clean-slate-test">10. Full Clean-Slate Test</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#kernel-source-files">Kernel Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#adding-a-new-kernel">Adding a New Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#host-device-nic-macro-separation">Host/Device NIC Macro Separation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_ARCHITECTURE.html#rocm-version-compatibility">ROCm Version Compatibility</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html">MORI JIT v2</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id1">1. 核心不变量</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id2">2. 分层</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#kernel">3. 一个 kernel 的三件套</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#cfg-c-20-structural-nttp">3.1 Cfg 作为单一模板参数（C++20 structural NTTP）</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id3">3.2 字段列表的完整性是承重的</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id4">3.3 生成的源码</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id5">3.4 缓存</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#host-device-host-hipcc">3.5 host/device 常量只有一份，且 host 不需要 hipcc</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id6">3.6 环境变量</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#dtype">3.7 dtype 是传输属性，不是算术属性</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#op">4. op 层</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id7">5. 两个后端共用一个 op</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#dispatch-combine">5.1 几何调优表：每个后端一份，dispatch 和 combine 再分开</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#python">6. Python 绑定</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id8">7. 几个有证据的决定</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id9">8. 性能</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id10">9. 移植来源与覆盖范围</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI_JIT_V2_DESIGN.html#id11">10. 测试</a></li>
 </ul>
 </li>
 </ul>
@@ -398,7 +583,7 @@ export UMBP_MASTER_BIN=/path/to/umbp_master
 <p>All <code class="docutils literal notranslate"><span class="pre">UMBP_*</span></code> timing knobs (<code class="docutils literal notranslate"><span class="pre">UMBP_HEARTBEAT_TTL_SEC</span></code>, <code class="docutils literal notranslate"><span class="pre">UMBP_REAPER_INTERVAL_SEC</span></code>,
 <code class="docutils literal notranslate"><span class="pre">UMBP_LEASE_DURATION_SEC</span></code>, …) are honored at master startup and printed once as
 <code class="docutils literal notranslate"><span class="pre">[Master]</span> <span class="pre">Resolved</span> <span class="pre">timing:</span> <span class="pre">...</span></code>. See
-<a class="reference external" href="../../src/umbp/doc/runtime-env-vars.md">runtime-env-vars.md</a> for the full list.</p>
+<a class="reference external" href="https://github.com/ROCm/mori/blob/main/src/umbp/doc/runtime-env-vars.md">runtime-env-vars.md</a> for the full list.</p>
 <p><strong>Examples:</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Defaults: gRPC on 0.0.0.0:50051, metrics on 9091</span>
 ./build/src/umbp/umbp_master
@@ -514,8 +699,8 @@ routing decisions; use <code class="docutils literal notranslate"><span class="p
 <p><strong>Constructor:</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">UMBPMasterClient</span><span class="p">(</span>
     <span class="n">master_address</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-    <span class="n">node_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
-    <span class="n">node_address</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+    <span class="n">node_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span><span class="p">,</span>
+    <span class="n">node_address</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span><span class="p">,</span>
 <span class="p">)</span>
 </pre></div>
 </div>
@@ -728,8 +913,8 @@ time ranking — snapshot the counter at two points and diff:</p>
     <span class="k">if</span> <span class="n">after</span><span class="p">[</span><span class="n">h</span><span class="p">]</span> <span class="o">-</span> <span class="n">before</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
 <span class="p">}</span>
 <span class="n">recent_hottest</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">delta</span><span class="o">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">kv</span><span class="p">:</span> <span class="n">kv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">)[:</span><span class="mi">32</span><span class="p">]</span>
-<span class="c1"># delta[h] is &quot;hits during the 5-minute window&quot;.  Hashes absent from</span>
-<span class="c1"># `after` either had zero traffic in the window or were GC&#39;d from the</span>
+<span class="c1"># delta[h] is "hits during the 5-minute window".  Hashes absent from</span>
+<span class="c1"># `after` either had zero traffic in the window or were GC'd from the</span>
 <span class="c1"># hit index after UMBP_HIT_INDEX_TTL_SEC of inactivity.</span>
 </pre></div>
 </div>
@@ -792,7 +977,7 @@ request batch on the client side.</p></td>
 </tbody>
 </table>
 <p>See the
-<a class="reference external" href="../../src/umbp/doc/runtime-env-vars.md">master env-var reference</a> for the
+<a class="reference external" href="https://github.com/ROCm/mori/blob/main/src/umbp/doc/runtime-env-vars.md">master env-var reference</a> for the
 full master env-var list.</p>
 <p><strong>Where to call from.</strong>  External-KV query methods are reachable through two
 Python clients.  Both ultimately go to the same master and read the same
@@ -863,9 +1048,9 @@ inactivity or if the master restarts.</p></td>
 <span class="n">_1GB</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>
 
 <span class="n">client</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span>
-    <span class="s2">&quot;127.0.0.1:15558&quot;</span><span class="p">,</span>
-    <span class="n">node_id</span><span class="o">=</span><span class="s2">&quot;worker-0&quot;</span><span class="p">,</span>
-    <span class="n">node_address</span><span class="o">=</span><span class="s2">&quot;worker-0:8080&quot;</span><span class="p">,</span>
+    <span class="s2">"127.0.0.1:15558"</span><span class="p">,</span>
+    <span class="n">node_id</span><span class="o">=</span><span class="s2">"worker-0"</span><span class="p">,</span>
+    <span class="n">node_address</span><span class="o">=</span><span class="s2">"worker-0:8080"</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="c1"># Register with available DRAM capacity</span>
@@ -881,14 +1066,14 @@ inactivity or if the master restarts.</p></td>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">mori.cpp</span><span class="w"> </span><span class="kn">import</span> <span class="n">UMBPMasterClient</span><span class="p">,</span> <span class="n">UMBPTierType</span>
 
 <span class="n">_1GB</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>
-<span class="n">master</span> <span class="o">=</span> <span class="s2">&quot;127.0.0.1:15558&quot;</span>
+<span class="n">master</span> <span class="o">=</span> <span class="s2">"127.0.0.1:15558"</span>
 
 <span class="c1"># Node A reports that it holds some KV blocks in DRAM</span>
-<span class="n">node_a</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">&quot;node-a:8080&quot;</span><span class="p">)</span>
+<span class="n">node_a</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">"node-a:8080"</span><span class="p">)</span>
 <span class="n">node_a</span><span class="o">.</span><span class="n">register_self</span><span class="p">({</span><span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">:</span> <span class="p">(</span><span class="n">_1GB</span><span class="p">,</span> <span class="n">_1GB</span><span class="p">)})</span>
 
-<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sha256-abc&quot;</span><span class="p">,</span> <span class="s2">&quot;sha256-def&quot;</span><span class="p">,</span> <span class="s2">&quot;sha256-ghi&quot;</span><span class="p">]</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
+<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"sha256-abc"</span><span class="p">,</span> <span class="s2">"sha256-def"</span><span class="p">,</span> <span class="s2">"sha256-ghi"</span><span class="p">]</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
 
 <span class="c1"># Node B queries which nodes hold these blocks</span>
 <span class="n">node_b</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">)</span>
@@ -896,30 +1081,30 @@ inactivity or if the master restarts.</p></td>
 
 <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">matches</span><span class="p">:</span>
     <span class="n">per_tier</span> <span class="o">=</span> <span class="p">{</span><span class="n">t</span><span class="o">.</span><span class="n">name</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">hs</span><span class="p">)</span> <span class="k">for</span> <span class="n">t</span><span class="p">,</span> <span class="n">hs</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">hashes_by_tier</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
-    <span class="n">peer</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">peer_address</span> <span class="ow">or</span> <span class="s2">&quot;&lt;no PeerService&gt;&quot;</span>
-    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;node </span><span class="si">{</span><span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="si">}</span><span class="s2"> @ </span><span class="si">{</span><span class="n">peer</span><span class="si">}</span><span class="s2"> has </span><span class="si">{</span><span class="n">m</span><span class="o">.</span><span class="n">matched_hash_count</span><span class="p">()</span><span class="si">}</span><span class="s2"> blocks: </span><span class="si">{</span><span class="n">per_tier</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-    <span class="c1"># → &quot;node node-a @ &lt;no PeerService&gt; has 3 blocks: {&#39;DRAM&#39;: 3}&quot;</span>
+    <span class="n">peer</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">peer_address</span> <span class="ow">or</span> <span class="s2">"&lt;no PeerService&gt;"</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"node </span><span class="si">{</span><span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="si">}</span><span class="s2"> @ </span><span class="si">{</span><span class="n">peer</span><span class="si">}</span><span class="s2"> has </span><span class="si">{</span><span class="n">m</span><span class="o">.</span><span class="n">matched_hash_count</span><span class="p">()</span><span class="si">}</span><span class="s2"> blocks: </span><span class="si">{</span><span class="n">per_tier</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="c1"># → "node node-a @ &lt;no PeerService&gt; has 3 blocks: {'DRAM': 3}"</span>
 </pre></div>
 </div>
 <p><strong>Revoking blocks when one tier is evicted:</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># GPU was evicted but the host (DRAM) mirror is still alive — drop only</span>
 <span class="c1"># the HBM bucket; node-a stays in the index with its DRAM bucket intact.</span>
-<span class="n">evicted</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sha256-abc&quot;</span><span class="p">,</span> <span class="s2">&quot;sha256-def&quot;</span><span class="p">]</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">revoke_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">evicted</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
+<span class="n">evicted</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"sha256-abc"</span><span class="p">,</span> <span class="s2">"sha256-def"</span><span class="p">]</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">revoke_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">evicted</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
 </pre></div>
 </div>
 <p><strong>Bulk revoke when an entire tier is wiped:</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Storage backend was cleared — drop every SSD bucket this node has in</span>
 <span class="c1"># one RPC.  HBM and DRAM buckets are untouched.</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">revoke_all_external_kv_blocks_at_tier</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">SSD</span><span class="p">)</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">revoke_all_external_kv_blocks_at_tier</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">SSD</span><span class="p">)</span>
 </pre></div>
 </div>
 <p><strong>Same node holding the same blocks on multiple tiers:</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># write_through created a CPU mirror while the GPU copy is still alive</span>
 <span class="c1"># — report both tiers; the master keeps both buckets.</span>
-<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sha256-prefix-0&quot;</span><span class="p">,</span> <span class="s2">&quot;sha256-prefix-1&quot;</span><span class="p">]</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
+<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"sha256-prefix-0"</span><span class="p">,</span> <span class="s2">"sha256-prefix-1"</span><span class="p">]</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
 
 <span class="n">matches</span> <span class="o">=</span> <span class="n">node_a</span><span class="o">.</span><span class="n">match_external_kv</span><span class="p">(</span><span class="n">hashes</span><span class="p">)</span>
 <span class="n">m</span> <span class="o">=</span> <span class="n">matches</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
@@ -929,21 +1114,21 @@ inactivity or if the master restarts.</p></td>
 </div>
 <p><strong>Multiple nodes holding the same blocks (different tiers):</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">_1GB</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>
-<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sha256-shared-0&quot;</span><span class="p">,</span> <span class="s2">&quot;sha256-shared-1&quot;</span><span class="p">]</span>
+<span class="n">hashes</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"sha256-shared-0"</span><span class="p">,</span> <span class="s2">"sha256-shared-1"</span><span class="p">]</span>
 
-<span class="n">node_a</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">&quot;node-a:8080&quot;</span><span class="p">)</span>
+<span class="n">node_a</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">"node-a:8080"</span><span class="p">)</span>
 <span class="n">node_a</span><span class="o">.</span><span class="n">register_self</span><span class="p">({</span><span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">:</span> <span class="p">(</span><span class="n">_1GB</span><span class="p">,</span> <span class="n">_1GB</span><span class="p">)})</span>
-<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-a&quot;</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
+<span class="n">node_a</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-a"</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
 
-<span class="n">node_b</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">&quot;node-b&quot;</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">&quot;node-b:8080&quot;</span><span class="p">)</span>
+<span class="n">node_b</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">,</span> <span class="n">node_id</span><span class="o">=</span><span class="s2">"node-b"</span><span class="p">,</span> <span class="n">node_address</span><span class="o">=</span><span class="s2">"node-b:8080"</span><span class="p">)</span>
 <span class="n">node_b</span><span class="o">.</span><span class="n">register_self</span><span class="p">({</span><span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">:</span> <span class="p">(</span><span class="n">_1GB</span><span class="p">,</span> <span class="n">_1GB</span><span class="p">)})</span>
-<span class="n">node_b</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;node-b&quot;</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
+<span class="n">node_b</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"node-b"</span><span class="p">,</span> <span class="n">hashes</span><span class="p">,</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">HBM</span><span class="p">)</span>
 
 <span class="c1"># match_external_kv returns one entry per node; each entry breaks the</span>
 <span class="c1"># matched hashes down by every tier they live on for that node.</span>
 <span class="n">matches</span> <span class="o">=</span> <span class="n">node_a</span><span class="o">.</span><span class="n">match_external_kv</span><span class="p">(</span><span class="n">hashes</span><span class="p">)</span>
 <span class="n">matched_nodes</span> <span class="o">=</span> <span class="p">{</span><span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">hashes_by_tier</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">matches</span><span class="p">}</span>
-<span class="c1"># → {&quot;node-a&quot;: [UMBPTierType.DRAM], &quot;node-b&quot;: [UMBPTierType.HBM]}</span>
+<span class="c1"># → {"node-a": [UMBPTierType.DRAM], "node-b": [UMBPTierType.HBM]}</span>
 </pre></div>
 </div>
 <p><strong>Using ``match_external_kv`` for KV-cache-aware scheduling:</strong></p>
@@ -953,14 +1138,14 @@ and per-hash source locations from this response.</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">collections</span><span class="w"> </span><span class="kn">import</span> <span class="n">defaultdict</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">mori.cpp</span><span class="w"> </span><span class="kn">import</span> <span class="n">UMBPMasterClient</span><span class="p">,</span> <span class="n">UMBPTierType</span>
 
-<span class="n">master</span> <span class="o">=</span> <span class="s2">&quot;127.0.0.1:15558&quot;</span>
+<span class="n">master</span> <span class="o">=</span> <span class="s2">"127.0.0.1:15558"</span>
 <span class="n">query_client</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="n">master</span><span class="p">)</span>
 
 <span class="n">query_hashes</span> <span class="o">=</span> <span class="p">[</span>
-    <span class="s2">&quot;sha256-prefix-0&quot;</span><span class="p">,</span>
-    <span class="s2">&quot;sha256-prefix-1&quot;</span><span class="p">,</span>
-    <span class="s2">&quot;sha256-prefix-2&quot;</span><span class="p">,</span>
-    <span class="s2">&quot;sha256-prefix-3&quot;</span><span class="p">,</span>
+    <span class="s2">"sha256-prefix-0"</span><span class="p">,</span>
+    <span class="s2">"sha256-prefix-1"</span><span class="p">,</span>
+    <span class="s2">"sha256-prefix-2"</span><span class="p">,</span>
+    <span class="s2">"sha256-prefix-3"</span><span class="p">,</span>
 <span class="p">]</span>
 <span class="n">matches</span> <span class="o">=</span> <span class="n">query_client</span><span class="o">.</span><span class="n">match_external_kv</span><span class="p">(</span><span class="n">query_hashes</span><span class="p">)</span>
 
@@ -972,9 +1157,9 @@ and per-hash source locations from this response.</p>
         <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="n">hashes</span><span class="p">:</span>
             <span class="n">locations_by_hash</span><span class="p">[</span><span class="n">h</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
                 <span class="p">{</span>
-                    <span class="s2">&quot;node_id&quot;</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="p">,</span>
-                    <span class="s2">&quot;peer_address&quot;</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">peer_address</span><span class="p">,</span>
-                    <span class="s2">&quot;tier&quot;</span><span class="p">:</span> <span class="n">tier</span><span class="p">,</span>
+                    <span class="s2">"node_id"</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="p">,</span>
+                    <span class="s2">"peer_address"</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">peer_address</span><span class="p">,</span>
+                    <span class="s2">"tier"</span><span class="p">:</span> <span class="n">tier</span><span class="p">,</span>
                 <span class="p">}</span>
             <span class="p">)</span>
 
@@ -989,19 +1174,19 @@ and per-hash source locations from this response.</p>
 
     <span class="n">summaries</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
         <span class="p">{</span>
-            <span class="s2">&quot;node_id&quot;</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="p">,</span>
-            <span class="s2">&quot;matched_blocks&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">best_tier_by_hash</span><span class="p">),</span>  <span class="c1"># distinct hashes</span>
-            <span class="s2">&quot;per_tier_blocks&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"node_id"</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">node_id</span><span class="p">,</span>
+            <span class="s2">"matched_blocks"</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">best_tier_by_hash</span><span class="p">),</span>  <span class="c1"># distinct hashes</span>
+            <span class="s2">"per_tier_blocks"</span><span class="p">:</span> <span class="p">{</span>
                 <span class="n">tier</span><span class="o">.</span><span class="n">name</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">hashes</span><span class="p">))</span>
                 <span class="k">for</span> <span class="n">tier</span><span class="p">,</span> <span class="n">hashes</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">hashes_by_tier</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
             <span class="p">},</span>
             <span class="c1"># Fastest tier for each matched hash on this node.</span>
-            <span class="s2">&quot;best_tier_by_hash&quot;</span><span class="p">:</span> <span class="n">best_tier_by_hash</span><span class="p">,</span>
+            <span class="s2">"best_tier_by_hash"</span><span class="p">:</span> <span class="n">best_tier_by_hash</span><span class="p">,</span>
         <span class="p">}</span>
     <span class="p">)</span>
 
 <span class="n">not_found</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">query_hashes</span><span class="p">)</span> <span class="o">-</span> <span class="nb">set</span><span class="p">(</span><span class="n">locations_by_hash</span><span class="p">)</span>
-<span class="n">best_node</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">summaries</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">s</span><span class="p">[</span><span class="s2">&quot;matched_blocks&quot;</span><span class="p">],</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+<span class="n">best_node</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">summaries</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">s</span><span class="p">[</span><span class="s2">"matched_blocks"</span><span class="p">],</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
 
 <span class="c1"># Example policy sketch:</span>
 <span class="c1"># - HBM hits are best routed to the same worker/rank.</span>
@@ -1016,7 +1201,7 @@ and per-hash source locations from this response.</p>
 <span class="k">def</span><span class="w"> </span><span class="nf">estimated_fetch_cost</span><span class="p">(</span><span class="n">summary</span><span class="p">):</span>
     <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span>
         <span class="n">tier_cost</span><span class="p">[</span><span class="n">tier</span><span class="p">]</span>
-        <span class="k">for</span> <span class="n">tier</span> <span class="ow">in</span> <span class="n">summary</span><span class="p">[</span><span class="s2">&quot;best_tier_by_hash&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">tier</span> <span class="ow">in</span> <span class="n">summary</span><span class="p">[</span><span class="s2">"best_tier_by_hash"</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">()</span>
     <span class="p">)</span>
 
 <span class="n">cost_aware_node</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">summaries</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="n">estimated_fetch_cost</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
@@ -1032,7 +1217,7 @@ with <code class="docutils literal notranslate"><span class="pre">count_as_hit=T
 gets one increment on the master:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">mori.cpp</span><span class="w"> </span><span class="kn">import</span> <span class="n">UMBPMasterClient</span>
 
-<span class="n">router</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="s2">&quot;127.0.0.1:15558&quot;</span><span class="p">)</span>
+<span class="n">router</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="s2">"127.0.0.1:15558"</span><span class="p">)</span>
 
 <span class="k">def</span><span class="w"> </span><span class="nf">route_request</span><span class="p">(</span><span class="n">prefix_hashes</span><span class="p">):</span>
     <span class="c1"># count_as_hit=True is the ONLY thing that feeds the hit index.</span>
@@ -1054,7 +1239,7 @@ universe in your caller; the master has no scan / top-N RPC.</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">mori.cpp</span><span class="w"> </span><span class="kn">import</span> <span class="n">UMBPMasterClient</span>
 
-<span class="n">monitor</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="s2">&quot;127.0.0.1:15558&quot;</span><span class="p">)</span>
+<span class="n">monitor</span> <span class="o">=</span> <span class="n">UMBPMasterClient</span><span class="p">(</span><span class="s2">"127.0.0.1:15558"</span><span class="p">)</span>
 
 <span class="c1"># The set of hashes you want to observe — typically the union of</span>
 <span class="c1"># hashes your workers have reported, or the prefix hashes your</span>
@@ -1074,9 +1259,9 @@ universe in your caller; the master has no scan / top-N RPC.</p>
 <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
     <span class="n">counts</span> <span class="o">=</span> <span class="n">fetch_counts</span><span class="p">(</span><span class="n">monitor</span><span class="p">,</span> <span class="n">tracked_hashes</span><span class="p">)</span>
     <span class="c1"># Hashes with no recorded routing hit are absent — that is NOT the</span>
-    <span class="c1"># same as hit_count_total == 0.  Treat absent as &quot;no counted</span>
-    <span class="c1"># routing lookup yet&quot; / &quot;GC&#39;d after UMBP_HIT_INDEX_TTL_SEC of</span>
-    <span class="c1"># inactivity&quot;.</span>
+    <span class="c1"># same as hit_count_total == 0.  Treat absent as "no counted</span>
+    <span class="c1"># routing lookup yet" / "GC'd after UMBP_HIT_INDEX_TTL_SEC of</span>
+    <span class="c1"># inactivity".</span>
     <span class="n">hottest</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">counts</span><span class="o">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">kv</span><span class="p">:</span> <span class="n">kv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">)[:</span><span class="mi">32</span><span class="p">]</span>
 
     <span class="c1"># What you do with `hottest` is entirely up to you — UMBP does not</span>
@@ -1163,9 +1348,9 @@ lose tier information or double-count hits.</p>
             <span class="n">client</span><span class="o">.</span><span class="n">unregister_self</span><span class="p">()</span>
 
 <span class="n">_1GB</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span>
-<span class="k">with</span> <span class="n">registered_client</span><span class="p">(</span><span class="s2">&quot;127.0.0.1:15558&quot;</span><span class="p">,</span> <span class="s2">&quot;worker-0&quot;</span><span class="p">,</span> <span class="p">{</span><span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">:</span> <span class="p">(</span><span class="n">_1GB</span><span class="p">,</span> <span class="n">_1GB</span><span class="p">)})</span> <span class="k">as</span> <span class="n">c</span><span class="p">:</span>
-    <span class="n">c</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">&quot;worker-0&quot;</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;sha256-abc&quot;</span><span class="p">],</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
-    <span class="n">matches</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="n">match_external_kv</span><span class="p">([</span><span class="s2">&quot;sha256-abc&quot;</span><span class="p">])</span>
+<span class="k">with</span> <span class="n">registered_client</span><span class="p">(</span><span class="s2">"127.0.0.1:15558"</span><span class="p">,</span> <span class="s2">"worker-0"</span><span class="p">,</span> <span class="p">{</span><span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">:</span> <span class="p">(</span><span class="n">_1GB</span><span class="p">,</span> <span class="n">_1GB</span><span class="p">)})</span> <span class="k">as</span> <span class="n">c</span><span class="p">:</span>
+    <span class="n">c</span><span class="o">.</span><span class="n">report_external_kv_blocks</span><span class="p">(</span><span class="s2">"worker-0"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"sha256-abc"</span><span class="p">],</span> <span class="n">UMBPTierType</span><span class="o">.</span><span class="n">DRAM</span><span class="p">)</span>
+    <span class="n">matches</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="n">match_external_kv</span><span class="p">([</span><span class="s2">"sha256-abc"</span><span class="p">])</span>
 </pre></div>
 </div>
 </section>
@@ -1183,7 +1368,7 @@ python<span class="w"> </span>examples/umbp/umbp_master_client_demo.py
 </pre></div>
 </div>
 <p>The script is reproduced in full at
-<a class="reference external" href="../../examples/umbp/umbp_master_client_demo.py">examples/umbp/umbp_master_client_demo.py</a>.</p>
+<a class="reference external" href="https://github.com/ROCm/mori/blob/main/examples/umbp/umbp_master_client_demo.py">examples/umbp/umbp_master_client_demo.py</a>.</p>
 </section>
 </section>
 
@@ -1197,7 +1382,9 @@ python<span class="w"> </span>examples/umbp/umbp_master_client_demo.py
   <hr/>
 
   <div role="contentinfo">
-    <p>&#169; Copyright 2026, AMD.</p>
+    <p>&#169; Copyright 2026, AMD.
+      <span class="lastupdated">Last updated on 2026-10-12.
+      </span></p>
   </div>
 
   Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
