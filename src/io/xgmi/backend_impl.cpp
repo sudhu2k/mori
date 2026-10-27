@@ -115,6 +115,8 @@ struct TransferCompletion {
   int eventDevice{-1};
   EventPool* eventPool{nullptr};
   std::function<void()> cleanup;
+  // Work outside the HIP stream (SDMA rect copies); the transfer completes once both are done.
+  std::function<bool()> sdmaDone;
   std::once_flag completionOnce;
   std::atomic<bool> completed{false};
   std::mutex eventMu;
@@ -122,6 +124,9 @@ struct TransferCompletion {
   void FinalizeBlocking() {
     std::lock_guard<std::mutex> lock(eventMu);
     std::call_once(completionOnce, [this]() {
+      if (sdmaDone) {
+        while (!sdmaDone()) sched_yield();
+      }
       hipError_t err = hipEventSynchronize(event);
       if (err == hipSuccess) {
         status->SetCode(StatusCode::SUCCESS);
@@ -138,6 +143,9 @@ struct TransferCompletion {
   void FinalizeNonBlocking() {
     std::lock_guard<std::mutex> lock(eventMu);
     if (completed.load(std::memory_order_acquire)) {
+      return;
+    }
+    if (sdmaDone && !sdmaDone()) {
       return;
     }
 
@@ -200,13 +208,15 @@ std::vector<MergedSeg> MergeSegments(const SizeVec& localOffsets, const SizeVec&
 }
 
 void ArmTransferCompletion(TransferStatus* status, hipEvent_t event, int eventDevice,
-                           EventPool* eventPool, std::function<void()> cleanup = {}) {
+                           EventPool* eventPool, std::function<void()> cleanup = {},
+                           std::function<bool()> sdmaDone = {}) {
   auto completion = std::make_shared<TransferCompletion>();
   completion->status = status;
   completion->event = event;
   completion->eventDevice = eventDevice;
   completion->eventPool = eventPool;
   completion->cleanup = std::move(cleanup);
+  completion->sdmaDone = std::move(sdmaDone);
   status->SetWaitCallback([completion]() { completion->FinalizeBlocking(); });
   status->SetProgressCallback([completion]() { completion->FinalizeNonBlocking(); });
 }
@@ -220,7 +230,8 @@ void ArmTransferCompletion(TransferStatus* status, hipEvent_t event, int eventDe
 XgmiBackendSession::XgmiBackendSession(const XgmiBackendConfig& config, void* localAddr,
                                        void* remoteAddr, int localDevice, int remoteDevice,
                                        bool isIpcSession, XgmiBackend* backend,
-                                       StreamPool* streamPool, EventPool* eventPool)
+                                       StreamPool* streamPool, EventPool* eventPool,
+                                       std::string remoteBusId)
     : config(config),
       localAddr(localAddr),
       remoteAddr(remoteAddr),
@@ -229,7 +240,19 @@ XgmiBackendSession::XgmiBackendSession(const XgmiBackendConfig& config, void* lo
       isIpcSession(isIpcSession),
       backend(backend),
       streamPool(streamPool),
-      eventPool(eventPool) {}
+      eventPool(eventPool),
+      remoteBusId(std::move(remoteBusId)) {}
+
+SdmaRectQueue* XgmiBackendSession::GetSdmaRectQueue() {
+  std::call_once(sdmaRectOnce, [this]() {
+    char localBusId[64] = {};
+    if (remoteBusId.empty() ||
+        hipDeviceGetPCIBusId(localBusId, sizeof(localBusId), localDevice) != hipSuccess)
+      return;
+    sdmaRectQueue = SdmaRectQueue::ForPeer(NormalizeBusId(localBusId), remoteBusId);
+  });
+  return sdmaRectQueue;
+}
 
 void XgmiBackendSession::ReadWrite(size_t localOffset, size_t remoteOffset, size_t size,
                                    TransferStatus* status, TransferUniqueId id, bool isRead) {
@@ -487,12 +510,6 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
       lo.push_back(localOffsets[i]);
       ro.push_back(remoteOffsets[i]);
       sz.push_back(sizes[i] * rows[i]);
-    } else if (sizes[i] >= config.strided2dMaxRow) {
-      for (size_t r = 0; r < rows[i]; ++r) {
-        lo.push_back(localOffsets[i] + r * localPitches[i]);
-        ro.push_back(remoteOffsets[i] + r * remotePitches[i]);
-        sz.push_back(sizes[i]);
-      }
     } else {
       strided.push_back(i);
     }
@@ -543,6 +560,11 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
     if (err != hipSuccess) return fail("memcpy");
   }
 
+  // Reads only: the queue runs on the local GPU, which is then the destination, as for the
+  // stream's copies.
+  SdmaRectQueue* sdma = isRead ? GetSdmaRectQueue() : nullptr;
+  std::vector<uint32_t> packets;
+  size_t sdmaEntries = 0;
   for (size_t i : strided) {
     char* local = static_cast<char*>(localAddr) + localOffsets[i];
     char* remote = static_cast<char*>(remoteAddr) + remoteOffsets[i];
@@ -550,6 +572,12 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
     const void* src = isRead ? remote : local;
     size_t dpitch = isRead ? localPitches[i] : remotePitches[i];
     size_t spitch = isRead ? remotePitches[i] : localPitches[i];
+    if (sdma != nullptr &&
+        SdmaRectQueue::AppendCopy(packets, reinterpret_cast<uintptr_t>(dst), dpitch,
+                                  reinterpret_cast<uintptr_t>(src), spitch, sizes[i], rows[i])) {
+      ++sdmaEntries;
+      continue;
+    }
     err = hipMemcpy2DAsync(dst, dpitch, src, spitch, sizes[i], rows[i], hipMemcpyDeviceToDevice,
                            stream);
     if (err != hipSuccess) return fail("hipMemcpy2DAsync");
@@ -558,10 +586,17 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
   err = hipEventRecord(event, stream);
   if (err != hipSuccess) return fail("hipEventRecord");
 
+  std::function<bool()> sdmaDone;
+  if (!packets.empty()) {
+    const uint32_t ticket = sdma->Submit(packets);
+    sdmaDone = [sdma, ticket]() { return sdma->Done(ticket); };
+  }
+
   status->SetCode(StatusCode::IN_PROGRESS);
-  ArmTransferCompletion(status, event, copyDevice, eventPool);
-  MORI_IO_TRACE("XGMI: Strided batch transfer, id={}, contiguous={}, strided={}, isRead={}", id,
-                sz.size(), strided.size(), isRead);
+  ArmTransferCompletion(status, event, copyDevice, eventPool, {}, std::move(sdmaDone));
+  MORI_IO_TRACE(
+      "XGMI: Strided batch transfer, id={}, contiguous={}, strided={}, sdma={}, isRead={}", id,
+      sz.size(), strided.size(), sdmaEntries, isRead);
 }
 
 bool XgmiBackendSession::Alive() const { return true; }
@@ -1056,7 +1091,8 @@ BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const Memory
     }
 
     return new XgmiBackendSession(config, localAddr, remoteAddr, localDevice, remoteDevice,
-                                  ipcSession, this, streamPool.get(), eventPool.get());
+                                  ipcSession, this, streamPool.get(), eventPool.get(),
+                                  NormalizeBusId(remote.deviceBusId));
   }
 
   // Hidden-device path: remote GPU is not visible, use IPC on localDevice
@@ -1070,7 +1106,8 @@ BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const Memory
   MORI_IO_INFO("XGMI: Created hidden-device IPC session (local id={}, remote id={}, device={})",
                local.id, remote.id, localDevice);
   return new XgmiBackendSession(config, localAddr, remoteAddr, localDevice, localDevice, true, this,
-                                streamPool.get(), eventPool.get());
+                                streamPool.get(), eventPool.get(),
+                                NormalizeBusId(remote.deviceBusId));
 }
 
 XgmiBackendSession* XgmiBackend::GetOrCreateSessionCached(const MemoryDesc& local,
@@ -1113,7 +1150,8 @@ XgmiBackendSession* XgmiBackend::GetOrCreateSessionCached(const MemoryDesc& loca
 
   auto sess =
       std::make_unique<XgmiBackendSession>(config, localAddr, remoteAddr, localDevice, remoteDevice,
-                                           ipcSession, this, streamPool.get(), eventPool.get());
+                                           ipcSession, this, streamPool.get(), eventPool.get(),
+                                           NormalizeBusId(remote.deviceBusId));
 
   XgmiBackendSession* rawPtr = sess.get();
   sessionCache[key] = std::move(sess);

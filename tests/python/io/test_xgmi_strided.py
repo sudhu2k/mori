@@ -26,10 +26,11 @@ Tests for IOEngine.batch_read_strided on the XGMI backend.
 Entry j of a strided read is rows[j] rows of sizes[j] bytes; row r is read from
 remote_offsets[j] + r * remote_pitches[j] into local_offsets[j] + r * local_pitches[j].
 The XGMI backend copies an entry as one contiguous block when it has one row or both
-pitches equal the row size, row by row when rows are at least
-XgmiBackendConfig.strided_2d_max_row bytes, and with one hipMemcpy2DAsync otherwise.
-Every test compares the whole destination buffer against the same copies done on the
-host, so bytes written outside the requested rows are caught too.
+pitches equal the row size, and otherwise as one 2D copy on the SDMA engine the driver
+recommends for the GPU pair, falling back to hipMemcpy2DAsync for what that queue can't
+take (unaligned addresses or pitches, pitches too large for its packets, one GPU). Every
+test compares the whole destination buffer against the same copies done on the host, so
+bytes written outside the requested rows are caught too.
 """
 
 import pytest
@@ -56,12 +57,10 @@ DST_GPU = 1
 KiB = 1024
 
 
-def _make_engine(key, **xgmi_kwargs):
+def _make_engine(key):
     set_log_level("info")
     engine = IOEngine(key=key, config=IOEngineConfig(host="", port=0))
-    engine.create_backend(
-        BackendType.XGMI, XgmiBackendConfig(num_streams=8, num_events=8, **xgmi_kwargs)
-    )
+    engine.create_backend(BackendType.XGMI, XgmiBackendConfig(num_streams=8, num_events=8))
     return engine
 
 
@@ -130,8 +129,7 @@ def _check(engine, src, dst, src_mem, dst_mem, entries):
 
 @pytest.mark.parametrize("half", [0, 1])
 def test_short_rows_column_half(xgmi_engine, half):
-    """A tensor-parallel column shard: one half of every 8 KiB row, packed on arrival
-    (rows below strided_2d_max_row, so one hipMemcpy2DAsync)."""
+    """A tensor-parallel column shard: one half of every 8 KiB row, packed on arrival."""
     rows, row = 512, 4 * KiB
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, rows * 2 * row, rows * row, seed=half
@@ -155,9 +153,8 @@ def test_short_rows_scatter(xgmi_engine):
     _check(xgmi_engine, src, dst, src_mem, dst_mem, [(512, 0, row, rows, pitch, row)])
 
 
-def test_long_rows_row_by_row(xgmi_engine):
-    """Rows of at least strided_2d_max_row (64 KiB default): grouped blocks such as one
-    query block per attention group, copied row by row."""
+def test_long_rows(xgmi_engine):
+    """Few long rows: grouped blocks such as one query block per attention group."""
     rows, row, src_pitch = 8, 256 * KiB, 320 * KiB
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, rows * src_pitch, rows * row
@@ -201,7 +198,7 @@ def test_mixed_batch(xgmi_engine):
         dst_mem,
         [
             (0, 3 * m, 2 * KiB, 128, 2 * KiB, 4 * KiB),  # short rows, 2D
-            (m, 0, 128 * KiB, 4, 160 * KiB, 128 * KiB),  # long rows, row by row
+            (m, 0, 128 * KiB, 4, 160 * KiB, 128 * KiB),  # long rows
             (2 * m, 5 * m, 64 * KiB, 1, 0, 0),  # one row
             (3 * m, 6 * m, 8 * KiB, 16, 8 * KiB, 8 * KiB),  # packed both sides
             (4 * m, 7 * m, 0, 10, 1 * KiB, 1 * KiB),  # zero bytes per row
@@ -232,7 +229,8 @@ def test_empty_batch(xgmi_engine):
 
 
 def test_same_gpu(xgmi_engine):
-    """Source and destination on one GPU take the hipMemcpyAsync path."""
+    """Source and destination on one GPU: hipMemcpyAsync, and hipMemcpy2DAsync for strided
+    entries."""
     src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, SRC_GPU, 4 << 20, 4 << 20)
     _check(
         xgmi_engine,
@@ -272,34 +270,114 @@ def test_two_batches_one_call(xgmi_engine):
         assert torch.equal(dst.cpu(), _expected(src, dst.numel(), entries))
 
 
-@pytest.mark.parametrize("max_row", [0, 1 << 40])
-def test_strided_2d_max_row(max_row):
-    """The threshold only picks the copy method: every row by row (0) or every strided
-    entry as one 2D copy (huge) gives the same bytes."""
-    engine = _make_engine(
-        f"strided_engine_max_row_{max_row}", strided_2d_max_row=max_row
+@pytest.mark.parametrize(
+    "size,rows,local_pitch,remote_pitch",
+    [
+        (384, 2048, 384, 1536),  # expert down_proj shard
+        (768 * KiB, 2, 768 * KiB, 3 * 1024 * KiB),  # wider than one packet (16 Ki elements)
+        (4 * 1024 * KiB, 8, 4 * 1024 * KiB, 6 * 1024 * KiB),  # Q blocks of a fused QKV
+        (4 * KiB, 20000, 4 * KiB, 8 * KiB),  # more rows than one packet (16 Ki)
+        (1, 100, 1, 4),  # 1-byte elements
+        (3, 100, 3, 8),  # odd width, 4-byte pitch: 1-byte elements
+        (386, 50, 386, 772),  # pitches not 4-byte aligned: hipMemcpy2DAsync
+        (16, 4, 16, 16 << 20),  # pitch too large for 16-byte elements in the packet
+        (4, 4, 4, 4 << 20),  # pitch too large at any element size: hipMemcpy2DAsync
+    ],
+)
+def test_shapes(xgmi_engine, size, rows, local_pitch, remote_pitch):
+    """SDMA packet tiling limits and element sizes, and the fallback for what packets can't
+    express."""
+    src, dst, src_mem, dst_mem = _alloc(
+        xgmi_engine, SRC_GPU, DST_GPU, rows * remote_pitch, rows * local_pitch + 64
     )
-    m = 1 << 20
-    src, dst, src_mem, dst_mem = _alloc(engine, SRC_GPU, DST_GPU, 8 * m, 8 * m)
     _check(
-        engine,
+        xgmi_engine,
+        src,
+        dst,
+        src_mem,
+        dst_mem,
+        [(64, 0, size, rows, local_pitch, remote_pitch)],
+    )
+
+
+def test_unaligned_offsets(xgmi_engine):
+    """Entries starting off a 4-byte boundary fall back; aligned ones in the same call don't."""
+    src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, DST_GPU, 1 << 20, 1 << 20)
+    _check(
+        xgmi_engine,
         src,
         dst,
         src_mem,
         dst_mem,
         [
-            (0, 0, 4 * KiB, 64, 4 * KiB, 8 * KiB),
-            (m, 2 * m, 128 * KiB, 8, 128 * KiB, 160 * KiB),
+            (1, 0, 256, 64, 256, 1024),
+            (64 * KiB, 3, 256, 64, 256, 1024),
+            (128 * KiB, 128 * KiB, 256, 64, 256, 1024),
         ],
     )
 
 
-def test_config_field():
-    assert XgmiBackendConfig().strided_2d_max_row == 64 * KiB
-    c = XgmiBackendConfig(strided_2d_max_row=4 * KiB)
-    assert c.strided_2d_max_row == 4 * KiB
-    c.strided_2d_max_row = 1
-    assert c.strided_2d_max_row == 1
+def test_many_calls_in_flight(xgmi_engine):
+    """Overlapping calls whose SDMA packets (one 52-byte packet per entry) wrap the queue's
+    1 MiB ring about twice."""
+    n, size, rows, pitch = 8192, 256, 2, 1 * KiB
+    src, dst, src_mem, dst_mem = _alloc(
+        xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
+    )
+    entries = [(i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)]
+    for _ in range(5):
+        pending = []
+        for b in range(0, n, 62):
+            chunk = entries[b : b + 62]
+            lo, ro, sz, nr, lp, rp = ([list(c)] for c in zip(*chunk))
+            uid = xgmi_engine.allocate_transfer_uid()
+            (st,) = xgmi_engine.batch_read_strided(
+                [dst_mem], lo, [src_mem], ro, sz, nr, lp, rp, [uid]
+            )
+            pending.append(st)
+        for st in pending:
+            st.Wait()
+            assert st.Succeeded(), st.Message()
+    torch.cuda.synchronize(dst.device)
+    assert torch.equal(dst.cpu(), _expected(src, dst.numel(), entries))
+
+
+def test_large_batch(xgmi_engine):
+    """One call whose SDMA packets (20,000 × 52 bytes) are split into several submissions."""
+    n, size, rows, pitch = 20000, 256, 2, 1 * KiB
+    src, dst, src_mem, dst_mem = _alloc(
+        xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
+    )
+    entries = [(i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)]
+    _check(xgmi_engine, src, dst, src_mem, dst_mem, entries)
+
+
+_SDMA_PROBE = """
+from tests.python.io.test_xgmi_strided import _make_engine, _alloc, _check, SRC_GPU, DST_GPU
+engine = _make_engine("strided_engine_probe")
+src, dst, src_mem, dst_mem = _alloc(engine, SRC_GPU, DST_GPU, 512 * 8192, 512 * 4096)
+_check(engine, src, dst, src_mem, dst_mem, [(0, 0, 4096, 512, 4096, 8192)])
+"""
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2
+    or not torch.cuda.get_device_properties(DST_GPU).gcnArchName.startswith("gfx9"),
+    reason="SDMA rect copies need gfx9",
+)
+def test_uses_sdma_queue():
+    """Strided entries reach the pair's SDMA queue rather than silently falling back. The
+    queue logs once, when the process creates it, hence a fresh process."""
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    out = subprocess.run(
+        [sys.executable, "-c", _SDMA_PROBE], cwd=root, capture_output=True, text=True, timeout=300
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "strided SDMA copies for" in out.stdout + out.stderr, (out.stdout + out.stderr)[-2000:]
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +389,7 @@ XP_SRC_BYTES = 8 << 20
 XP_DST_BYTES = 8 << 20
 XP_ENTRIES = [
     (0, 4 * KiB, 4 * KiB, 512, 4 * KiB, 8 * KiB),  # 2D
-    (2 << 20, 4 << 20, 192 * KiB, 4, 192 * KiB, 256 * KiB),  # row by row
+    (2 << 20, 4 << 20, 192 * KiB, 4, 192 * KiB, 256 * KiB),  # long rows
     (4 << 20, 1 << 20, 1 << 20, 1, 1 << 20, 1 << 20),  # one row
 ]
 

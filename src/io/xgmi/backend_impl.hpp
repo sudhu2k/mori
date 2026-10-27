@@ -27,12 +27,14 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 
 #include "mori/io/backend.hpp"
 #include "mori/io/common.hpp"
 #include "mori/io/engine.hpp"
 #include "src/io/xgmi/hip_resource_pool.hpp"
+#include "src/io/xgmi/sdma_rect.hpp"
 
 namespace mori {
 namespace io {
@@ -47,7 +49,7 @@ class XgmiBackendSession : public BackendSession {
   XgmiBackendSession() = default;
   XgmiBackendSession(const XgmiBackendConfig& config, void* localAddr, void* remoteAddr,
                      int localDevice, int remoteDevice, bool isIpcSession, XgmiBackend* backend,
-                     StreamPool* streamPool, EventPool* eventPool);
+                     StreamPool* streamPool, EventPool* eventPool, std::string remoteBusId);
   ~XgmiBackendSession() = default;
 
   void ReadWrite(size_t localOffset, size_t remoteOffset, size_t size, TransferStatus* status,
@@ -57,8 +59,9 @@ class XgmiBackendSession : public BackendSession {
                       const SizeVec& sizes, TransferStatus* status, TransferUniqueId id,
                       bool isRead) override;
 
-  // Contiguous entries go as in BatchReadWrite (without the scatter/gather kernel),
-  // each strided entry as one hipMemcpy2DAsync, all on one stream.
+  // Contiguous entries go as in BatchReadWrite (without the scatter/gather kernel), each
+  // strided entry as one 2D copy on the pair's SDMA queue, or as hipMemcpy2DAsync on the same
+  // stream where that queue can't take it.
   void BatchReadWriteStrided(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
                              const SizeVec& sizes, const SizeVec& rows,
                              const SizeVec& localPitches, const SizeVec& remotePitches,
@@ -67,6 +70,8 @@ class XgmiBackendSession : public BackendSession {
   bool Alive() const override;
 
  private:
+  SdmaRectQueue* GetSdmaRectQueue();
+
   XgmiBackendConfig config{};
   void* localAddr{nullptr};
   void* remoteAddr{nullptr};
@@ -76,6 +81,9 @@ class XgmiBackendSession : public BackendSession {
   XgmiBackend* backend{nullptr};
   StreamPool* streamPool{nullptr};
   EventPool* eventPool{nullptr};
+  std::string remoteBusId;
+  std::once_flag sdmaRectOnce;
+  SdmaRectQueue* sdmaRectQueue{nullptr};
 };
 
 /* ---------------------------------------------------------------------------------------------- */
