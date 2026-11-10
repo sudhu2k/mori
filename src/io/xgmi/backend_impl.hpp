@@ -60,8 +60,8 @@ class XgmiBackendSession : public BackendSession {
                       bool isRead) override;
 
   // Contiguous entries go as in BatchReadWrite (without the scatter/gather kernel), each
-  // strided entry as one 2D copy on the pair's SDMA queue, or as hipMemcpy2DAsync on the same
-  // stream where that queue can't take it.
+  // strided entry as one 2D copy on the pair's ROCr SDMA blit queue, or as hipMemcpy2DAsync on
+  // the same stream where ROCr can't take it.
   void BatchReadWriteStrided(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
                              const SizeVec& sizes, const SizeVec& rows,
                              const SizeVec& localPitches, const SizeVec& remotePitches,
@@ -70,7 +70,7 @@ class XgmiBackendSession : public BackendSession {
   bool Alive() const override;
 
  private:
-  SdmaRectQueue* GetSdmaRectQueue();
+  SdmaRectCopier* GetSdmaRectCopier(bool isRead);
 
   XgmiBackendConfig config{};
   void* localAddr{nullptr};
@@ -82,8 +82,8 @@ class XgmiBackendSession : public BackendSession {
   StreamPool* streamPool{nullptr};
   EventPool* eventPool{nullptr};
   std::string remoteBusId;
-  std::once_flag sdmaRectOnce;
-  SdmaRectQueue* sdmaRectQueue{nullptr};
+  std::once_flag sdmaRectOnce[2];
+  SdmaRectCopier* sdmaRectCopier[2]{nullptr, nullptr};  // [isRead]
 };
 
 /* ---------------------------------------------------------------------------------------------- */

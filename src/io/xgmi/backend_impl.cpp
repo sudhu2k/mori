@@ -37,6 +37,8 @@
 #include <functional>
 #include <numeric>
 #include <sstream>
+#include <tuple>
+#include <utility>
 
 #include "mori/io/env.hpp"
 #include "mori/io/logging.hpp"
@@ -45,6 +47,19 @@
 namespace mori {
 namespace io {
 namespace {
+
+// Rows longer than this, in strided entries that merge with no other, go as 1D peer copies.
+// HIP runs peer copies of up to ROC_P2P_SDMA_SIZE KiB (1 MiB by default) as blit kernels on the
+// compute units, so shorter rows stay 2D. MORI_IO_XGMI_STRIDED_ROW_COPY_MIN (bytes) overrides it.
+size_t StridedRowCopyMin() {
+  static const size_t bytes = []() -> size_t {
+    const char* env = std::getenv("MORI_IO_XGMI_STRIDED_ROW_COPY_MIN");
+    if (env != nullptr && env[0] != '\0') return std::strtoull(env, nullptr, 0);
+    const char* kib = std::getenv("ROC_P2P_SDMA_SIZE");
+    return (kib != nullptr && kib[0] != '\0' ? std::strtoull(kib, nullptr, 0) : 1024) * 1024;
+  }();
+  return bytes;
+}
 
 int getScatterGatherKernelThreshold() {
   static const int threshold = []() {
@@ -126,8 +141,6 @@ struct TransferCompletion {
     std::lock_guard<std::mutex> lock(eventMu);
     std::call_once(completionOnce, [this]() {
       if (sdmaDone) {
-        // A faulted SDMA engine never writes the fence, and ROCr does not know about this queue,
-        // so nothing else reports it.
         const auto start = std::chrono::steady_clock::now();
         bool warned = false;
         while (!sdmaDone()) {
@@ -140,7 +153,7 @@ struct TransferCompletion {
           sched_yield();
         }
       }
-      hipError_t err = hipEventSynchronize(event);
+      hipError_t err = event != nullptr ? hipEventSynchronize(event) : hipSuccess;
       if (err == hipSuccess) {
         status->SetCode(StatusCode::SUCCESS);
       } else {
@@ -148,7 +161,7 @@ struct TransferCompletion {
                        std::string("XGMI: hipEventSynchronize failed: ") + hipGetErrorString(err));
       }
       if (cleanup) cleanup();
-      eventPool->PutEvent(event, eventDevice);
+      if (event != nullptr) eventPool->PutEvent(event, eventDevice);
       completed.store(true, std::memory_order_release);
     });
   }
@@ -162,7 +175,7 @@ struct TransferCompletion {
       return;
     }
 
-    hipError_t err = hipEventQuery(event);
+    hipError_t err = event != nullptr ? hipEventQuery(event) : hipSuccess;
     if (err == hipErrorNotReady) {
       (void)hipGetLastError();
       return;
@@ -176,7 +189,7 @@ struct TransferCompletion {
                        std::string("XGMI: hipEventQuery failed: ") + hipGetErrorString(err));
       }
       if (cleanup) cleanup();
-      eventPool->PutEvent(event, eventDevice);
+      if (event != nullptr) eventPool->PutEvent(event, eventDevice);
       completed.store(true, std::memory_order_release);
     });
   }
@@ -256,8 +269,8 @@ XgmiBackendSession::XgmiBackendSession(const XgmiBackendConfig& config, void* lo
       eventPool(eventPool),
       remoteBusId(std::move(remoteBusId)) {}
 
-SdmaRectQueue* XgmiBackendSession::GetSdmaRectQueue() {
-  std::call_once(sdmaRectOnce, [this]() {
+SdmaRectCopier* XgmiBackendSession::GetSdmaRectCopier(bool isRead) {
+  std::call_once(sdmaRectOnce[isRead], [this, isRead]() {
     char localBusId[64] = {};
     if (remoteBusId.empty() ||
         hipDeviceGetPCIBusId(localBusId, sizeof(localBusId), localDevice) != hipSuccess) {
@@ -267,9 +280,11 @@ SdmaRectQueue* XgmiBackendSession::GetSdmaRectQueue() {
           localDevice, remoteBusId);
       return;
     }
-    sdmaRectQueue = SdmaRectQueue::ForPeer(NormalizeBusId(localBusId), remoteBusId);
+    const std::string local = NormalizeBusId(localBusId);
+    sdmaRectCopier[isRead] = isRead ? SdmaRectCopier::ForPair(local, remoteBusId)
+                                    : SdmaRectCopier::ForPair(remoteBusId, local);
   });
-  return sdmaRectQueue;
+  return sdmaRectCopier[isRead];
 }
 
 void XgmiBackendSession::ReadWrite(size_t localOffset, size_t remoteOffset, size_t size,
@@ -564,6 +579,65 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
     eventPool->PutEvent(event, copyDevice);
   };
 
+  SdmaRectCopier* sdma = GetSdmaRectCopier(isRead);
+  // Entries of one shape spaced evenly on both sides (e.g. the same slice of each stacked
+  // expert) become one 3D copy.
+  if (sdma != nullptr) {
+    std::sort(strided.begin(), strided.end(), [&](size_t a, size_t b) {
+      return std::tie(sizes[a], rows[a], localPitches[a], remotePitches[a], localOffsets[a]) <
+             std::tie(sizes[b], rows[b], localPitches[b], remotePitches[b], localOffsets[b]);
+    });
+  }
+  auto sameShape = [&](size_t a, size_t b) {
+    return sizes[a] == sizes[b] && rows[a] == rows[b] && localPitches[a] == localPitches[b] &&
+           remotePitches[a] == remotePitches[b];
+  };
+  struct Run {
+    size_t first, count, localStep, remoteStep;
+    bool byRow;
+  };
+  std::vector<Run> runs;
+  const size_t rowCopyMin = StridedRowCopyMin();
+  size_t rowByRow = 0;
+  for (size_t run = 0; run < strided.size();) {
+    const size_t i = strided[run];
+    size_t count = 1, localStep = 0, remoteStep = 0;
+    if (sdma != nullptr && run + 1 < strided.size() && sameShape(i, strided[run + 1])) {
+      const size_t j = strided[run + 1];
+      localStep = localOffsets[j] - localOffsets[i];
+      remoteStep = remoteOffsets[j] - remoteOffsets[i];
+      if (remoteOffsets[j] > remoteOffsets[i] && localStep >= rows[i] * localPitches[i] &&
+          remoteStep >= rows[i] * remotePitches[i]) {
+        while (run + count < strided.size()) {
+          const size_t k = strided[run + count], prev = strided[run + count - 1];
+          if (!sameShape(i, k) || localOffsets[k] - localOffsets[prev] != localStep ||
+              remoteOffsets[k] - remoteOffsets[prev] != remoteStep)
+            break;
+          ++count;
+        }
+      }
+    }
+    // An entry left on its own costs one command on a blit queue that several GPU pairs may
+    // share; long rows go instead as 1D copies on the engine of the pair's own link, through
+    // ROCr, or else through HIP, which copies them on SDMA only above ROC_P2P_SDMA_SIZE.
+    const bool longRows = count == 1 && srcDevice != dstDevice && sizes[i] > rowCopyMin;
+    if (longRows && sdma != nullptr && sdma->HasRowEngine()) {
+      runs.push_back({run, 1, 0, 0, true});
+      ++rowByRow;
+    } else if (longRows) {
+      for (size_t r = 0; r < rows[i]; ++r) {
+        lo.push_back(localOffsets[i] + r * localPitches[i]);
+        ro.push_back(remoteOffsets[i] + r * remotePitches[i]);
+        sz.push_back(sizes[i]);
+      }
+      ++rowByRow;
+    } else {
+      runs.push_back({run, count, localStep, remoteStep, false});
+    }
+    run += count;
+  }
+
+  bool onStream = false;
   for (const auto& seg : MergeSegments(lo, ro, sz)) {
     void* src = isRead ? static_cast<char*>(remoteAddr) + seg.remoteOff
                        : static_cast<char*>(localAddr) + seg.localOff;
@@ -575,45 +649,104 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
       err = hipMemcpyPeerAsync(dst, dstDevice, src, srcDevice, seg.sz, stream);
     }
     if (err != hipSuccess) return fail("memcpy");
+    onStream = true;
   }
 
-  // Reads only: the queue runs on the local GPU, which is then the destination, as for the
-  // stream's copies.
-  SdmaRectQueue* sdma = isRead ? GetSdmaRectQueue() : nullptr;
-  std::vector<uint32_t> packets;
-  size_t sdmaEntries = 0;
-  for (size_t i : strided) {
+  hsa_signal_t signal{0};
+  if (sdma != nullptr && !runs.empty() &&
+      hsa_amd_signal_create(0, 0, nullptr, HSA_AMD_SIGNAL_AMD_GPU_ONLY, &signal) !=
+          HSA_STATUS_SUCCESS) {
+    sdma = nullptr;
+  }
+  auto destroySignal = [signal]() {
+    if (signal.handle != 0) hsa_signal_destroy(signal);
+  };
+  auto failSdma = [&](const char* what) {
+    // Copies already on the SDMA queues still write the buffers and the signal.
+    if (signal.handle != 0) {
+      hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+                                HSA_WAIT_STATE_BLOCKED);
+    }
+    destroySignal();
+    fail(what);
+  };
+  auto entryPtrs = [&](size_t i) {
     char* local = static_cast<char*>(localAddr) + localOffsets[i];
     char* remote = static_cast<char*>(remoteAddr) + remoteOffsets[i];
-    void* dst = isRead ? local : remote;
-    const void* src = isRead ? remote : local;
-    size_t dpitch = isRead ? localPitches[i] : remotePitches[i];
-    size_t spitch = isRead ? remotePitches[i] : localPitches[i];
-    if (sdma != nullptr &&
-        SdmaRectQueue::AppendCopy(packets, reinterpret_cast<uintptr_t>(dst), dpitch,
-                                  reinterpret_cast<uintptr_t>(src), spitch, sizes[i], rows[i])) {
+    return std::pair<void*, const void*>(isRead ? local : remote, isRead ? remote : local);
+  };
+  size_t sdmaEntries = 0, sdmaCopies = 0;
+  for (const Run& run : runs) {
+    const size_t i = strided[run.first];
+    const size_t lp = localPitches[i], rp = remotePitches[i];
+    const size_t dpitch = isRead ? lp : rp, spitch = isRead ? rp : lp;
+    auto [dst, src] = entryPtrs(i);
+    if (run.byRow) {
+      for (size_t r = 0; r < rows[i]; ++r) {
+        char* d = static_cast<char*>(dst) + r * dpitch;
+        const char* s = static_cast<const char*>(src) + r * spitch;
+        if (sdma != nullptr && sdma->CopyRow(d, s, sizes[i], signal)) continue;
+        err = hipMemcpyPeerAsync(d, dstDevice, s, srcDevice, sizes[i], stream);
+        if (err != hipSuccess) return failSdma("hipMemcpyPeerAsync");
+        onStream = true;
+      }
       ++sdmaEntries;
+      sdmaCopies += rows[i];
       continue;
     }
-    err = hipMemcpy2DAsync(dst, dpitch, src, spitch, sizes[i], rows[i], hipMemcpyDeviceToDevice,
-                           stream);
-    if (err != hipSuccess) return fail("hipMemcpy2DAsync");
+    // Blocks that continue each other on both sides are one taller block; SDMA copies short
+    // slices slower than the same rows in one.
+    const bool adjacent = run.localStep == rows[i] * lp && run.remoteStep == rows[i] * rp;
+    if (run.count > 1 && sdma != nullptr &&
+        (adjacent ? sdma->Copy(dst, dpitch, src, spitch, sizes[i], rows[i] * run.count, signal)
+                  : sdma->Copy(dst, dpitch, src, spitch, sizes[i], rows[i], signal, run.count,
+                               isRead ? run.localStep : run.remoteStep,
+                               isRead ? run.remoteStep : run.localStep))) {
+      sdmaEntries += run.count;
+      ++sdmaCopies;
+      continue;
+    }
+    for (size_t e = run.first; e < run.first + run.count; ++e) {
+      const size_t k = strided[e];
+      std::tie(dst, src) = entryPtrs(k);
+      if (sdma != nullptr && sdma->Copy(dst, dpitch, src, spitch, sizes[k], rows[k], signal)) {
+        ++sdmaEntries;
+        ++sdmaCopies;
+        continue;
+      }
+      err = hipMemcpy2DAsync(dst, dpitch, src, spitch, sizes[k], rows[k], hipMemcpyDeviceToDevice,
+                             stream);
+      if (err != hipSuccess) return failSdma("hipMemcpy2DAsync");
+      onStream = true;
+    }
   }
 
-  err = hipEventRecord(event, stream);
-  if (err != hipSuccess) return fail("hipEventRecord");
+  if (onStream) {
+    err = hipEventRecord(event, stream);
+    if (err != hipSuccess) return failSdma("hipEventRecord");
+  } else {
+    // HIP shares a few hardware queues among all streams, so an event on an otherwise empty
+    // stream can still wait behind other streams' kernels.
+    eventPool->PutEvent(event, copyDevice);
+    event = nullptr;
+  }
 
   std::function<bool()> sdmaDone;
-  if (!packets.empty()) {
-    const uint32_t ticket = sdma->Submit(packets);
-    sdmaDone = [sdma, ticket]() { return sdma->Done(ticket); };
+  std::function<void()> cleanup;
+  if (sdmaEntries != 0) {
+    sdmaDone = [signal]() { return hsa_signal_load_scacquire(signal) == 0; };
+    cleanup = destroySignal;
+  } else {
+    destroySignal();
   }
 
   status->SetCode(StatusCode::IN_PROGRESS);
-  ArmTransferCompletion(status, event, copyDevice, eventPool, {}, std::move(sdmaDone));
+  ArmTransferCompletion(status, event, copyDevice, eventPool, std::move(cleanup),
+                        std::move(sdmaDone));
   MORI_IO_TRACE(
-      "XGMI: Strided batch transfer, id={}, contiguous={}, strided={}, sdma={}, isRead={}", id,
-      sz.size(), strided.size(), sdmaEntries, isRead);
+      "XGMI: Strided batch transfer, id={}, contiguous={}, strided={}, sdma={} in {} copies, "
+      "row by row={}, isRead={}",
+      id, sz.size(), strided.size(), sdmaEntries, sdmaCopies, rowByRow, isRead);
 }
 
 bool XgmiBackendSession::Alive() const { return true; }

@@ -21,55 +21,60 @@
 // SOFTWARE.
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <mutex>
-#include <string>
-#include <vector>
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 
-#include "hsakmt/hsakmt.h"
+#include <cstddef>
+#include <string>
 
 namespace mori {
 namespace io {
 
-// SDMA queue owned by MORI on one copy engine of one GPU, fed from the host with 2D
-// (COPY_LINEAR_RECT) packets. HIP runs 2D copies between GPUs on the compute units, and ROCr's
-// SDMA rect copy only uses the host-to-device and device-to-host queues; this queue runs on the
-// xGMI engine the driver recommends for a GPU pair, like HIP's 1D peer copies.
+// 2D copies between two GPUs on ROCr's SDMA blit queues (hsa_amd_memory_async_copy_rect). HIP
+// runs 2D copies between GPUs on the compute units instead.
 //
-// gfx9 only (MI300, MI350): the packet layout differs on gfx12, and gfx9 SDMA copies need no
-// cache maintenance packets (ROCr's BlitSdmaV4 emits none either).
-class SdmaRectQueue {
+// ROCr's rect copy takes no engine: it runs on the host-to-device or device-to-host blit queue of
+// the agent it is given, about 60 GB/s each. Each GPU pair is given one of four queues, the
+// destination or the source GPU's, either direction, picked from the two GPUs' KFD node numbers
+// alone. Processes that never talk to each other then spread an all-pairs pattern (N readers by
+// N sources, N <= 4) over distinct queues.
+class SdmaRectCopier {
  public:
-  // The queue, shared per process, on the engine recommended for copies on localBusId's GPU with
-  // remoteBusId's GPU. nullptr if the pair has no recommended engine, the GPU is not gfx9, or
-  // the queue cannot be created; callers then fall back to hipMemcpy2DAsync.
-  static SdmaRectQueue* ForPeer(const std::string& localBusId, const std::string& remoteBusId);
+  // The copier, shared per process, for copies into dstBusId's GPU from srcBusId's GPU. srcBusId's
+  // GPU may be invisible to this process, in which case only the destination's queues are used.
+  // nullptr if MORI_IO_XGMI_SDMA_RECT=0, the destination GPU has no HSA agent, or it is not gfx9;
+  // callers then use hipMemcpy2DAsync.
+  static SdmaRectCopier* ForPair(const std::string& dstBusId, const std::string& srcBusId);
 
-  // Appends the packets for one copy of `rows` rows of `width` bytes. Returns false, appending
-  // nothing, if the copy cannot be expressed (addresses or pitches not 4-byte aligned, or a
-  // pitch too large for the packet).
-  static bool AppendCopy(std::vector<uint32_t>& packets, uintptr_t dst, size_t dstPitch,
-                         uintptr_t src, size_t srcPitch, size_t width, size_t rows);
+  // Issues one copy of `slices` blocks of `rows` rows of `width` bytes, block k starting
+  // k * dstSlice / k * srcSlice bytes after the first; `signal` is incremented before the copy
+  // is issued and decremented by ROCr when it completes. Returns false, issuing nothing, if ROCr
+  // cannot take the copy (addresses, pitches or slices not 4-byte aligned, or too large).
+  //
+  // ROCr costs about 7 us of engine time per copy whatever its size, so callers merge what they
+  // can into slices.
+  bool Copy(void* dst, size_t dstPitch, const void* src, size_t srcPitch, size_t width, size_t rows,
+            hsa_signal_t signal, size_t slices = 1, size_t dstSlice = 0, size_t srcSlice = 0) const;
 
-  // Submits packets built by AppendCopy; returns a ticket for Done.
-  uint32_t Submit(const std::vector<uint32_t>& packets);
-  bool Done(uint32_t ticket) const;
+  // Whether CopyRow can run: ROCr recommends an engine for the pair and both GPUs are visible.
+  bool HasRowEngine() const { return rowEngine != 0; }
 
-  SdmaRectQueue(const SdmaRectQueue&) = delete;
-  SdmaRectQueue& operator=(const SdmaRectQueue&) = delete;
+  // Issues one 1D copy on the SDMA engine ROCr recommends for the pair's link, counted on
+  // `signal` as in Copy. These engines are per link, where the 2D queues are shared by every
+  // pair given the same agent.
+  bool CopyRow(void* dst, const void* src, size_t size, hsa_signal_t signal) const;
+
+  SdmaRectCopier(const SdmaRectCopier&) = delete;
+  SdmaRectCopier& operator=(const SdmaRectCopier&) = delete;
 
  private:
-  SdmaRectQueue() = default;
-  bool Init(uint32_t gpuNode, uint32_t engine);
-  uint32_t SubmitPiece(const uint32_t* packets, size_t dwords);
+  SdmaRectCopier(hsa_agent_t agent, hsa_amd_copy_direction_t queue) : agent(agent), queue(queue) {}
 
-  std::mutex mu;
-  void* ring{nullptr};
-  volatile uint32_t* fence{nullptr};
-  HsaQueueResource queue{};
-  uint64_t writeIndex{0};
-  uint32_t lastTicket{0};
+  hsa_agent_t agent;
+  // Only selects which of the agent's blit queues runs the copy.
+  hsa_amd_copy_direction_t queue;
+  hsa_agent_t dstAgent{}, srcAgent{};
+  hsa_amd_sdma_engine_id_t rowEngine{static_cast<hsa_amd_sdma_engine_id_t>(0)};
 };
 
 }  // namespace io

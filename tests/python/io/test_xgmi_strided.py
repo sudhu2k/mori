@@ -26,9 +26,11 @@ Tests for IOEngine.batch_read_strided on the XGMI backend.
 Entry j of a strided read is rows[j] rows of sizes[j] bytes; row r is read from
 remote_offsets[j] + r * remote_pitches[j] into local_offsets[j] + r * local_pitches[j].
 The XGMI backend copies an entry as one contiguous block when it has one row or both
-pitches equal the row size, and otherwise as one 2D copy on the SDMA engine the driver
-recommends for the GPU pair, falling back to hipMemcpy2DAsync for what that queue can't
-take (unaligned addresses or pitches, pitches too large for its packets, one GPU). Every
+pitches equal the row size, and otherwise as a 2D copy on one of ROCr's SDMA blit queues
+(hsa_amd_memory_async_copy_rect), merging entries of one shape spaced evenly on both sides
+into one 3D copy, and falling back to hipMemcpy2DAsync for what ROCr can't take (unaligned
+addresses or pitches, pitches too large for its packets, one GPU). An entry that merges with
+no other and has rows over 1 MiB goes row by row as 1D copies on the pair's link engine. Every
 test compares the whole destination buffer against the same copies done on the host, so
 bytes written outside the requested rows are caught too.
 """
@@ -283,7 +285,12 @@ def test_two_batches_one_call(xgmi_engine):
             768 * KiB,
             3 * 1024 * KiB,
         ),  # wider than one packet (16 Ki elements)
-        (4 * 1024 * KiB, 8, 4 * 1024 * KiB, 6 * 1024 * KiB),  # Q blocks of a fused QKV
+        (
+            4 * 1024 * KiB,
+            8,
+            4 * 1024 * KiB,
+            6 * 1024 * KiB,
+        ),  # Q blocks of a fused QKV: rows over 1 MiB go 1D on the link engine
         (4 * KiB, 20000, 4 * KiB, 8 * KiB),  # more rows than one packet (16 Ki)
         (1, 100, 1, 4),  # 1-byte elements
         (3, 100, 3, 8),  # odd width, 4-byte pitch: 1-byte elements
@@ -293,8 +300,8 @@ def test_two_batches_one_call(xgmi_engine):
     ],
 )
 def test_shapes(xgmi_engine, size, rows, local_pitch, remote_pitch):
-    """SDMA packet tiling limits and element sizes, and the fallback for what packets can't
-    express."""
+    """SDMA packet tiling limits and element sizes in ROCr, and the fallback for what its
+    packets can't express."""
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, rows * remote_pitch, rows * local_pitch + 64
     )
@@ -381,16 +388,21 @@ def test_mismatched_batch_lists_raise(xgmi_engine):
         )
 
 
+def _unmergeable(n, size, rows, pitch):
+    """n entries whose destinations run backwards against their sources, so none merge."""
+    return [
+        ((n - 1 - i) * rows * size, i * rows * pitch, size, rows, size, pitch)
+        for i in range(n)
+    ]
+
+
 def test_many_calls_in_flight(xgmi_engine):
-    """Overlapping calls whose SDMA packets (one 52-byte packet per entry) wrap the queue's
-    1 MiB ring about twice."""
+    """Overlapping calls with one ROCr copy per entry, about 40,000 copies on one queue."""
     n, size, rows, pitch = 8192, 256, 2, 1 * KiB
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
     )
-    entries = [
-        (i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)
-    ]
+    entries = _unmergeable(n, size, rows, pitch)
     for _ in range(5):
         pending = []
         for b in range(0, n, 62):
@@ -409,15 +421,57 @@ def test_many_calls_in_flight(xgmi_engine):
 
 
 def test_large_batch(xgmi_engine):
-    """One call whose SDMA packets (20,000 × 52 bytes) are split into several submissions."""
+    """One call of 20,000 entries that cannot merge: 20,000 ROCr copies on one signal."""
     n, size, rows, pitch = 20000, 256, 2, 1 * KiB
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
     )
-    entries = [
-        (i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)
+    _check(xgmi_engine, src, dst, src_mem, dst_mem, _unmergeable(n, size, rows, pitch))
+
+
+def _spaced(n, size, rows, lp, rp, local_step, remote_step, local_base=0, remote_base=0):
+    return [
+        (local_base + i * local_step, remote_base + i * remote_step, size, rows, lp, rp)
+        for i in range(n)
     ]
-    _check(xgmi_engine, src, dst, src_mem, dst_mem, entries)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        # Back to back on both sides: one taller 2D copy.
+        _spaced(64, 1 * KiB, 8, 1 * KiB, 4 * KiB, 8 * KiB, 32 * KiB),
+        # Gaps on both sides (the same slice of each stacked expert): one 3D copy.
+        _spaced(48, 384, 32, 384, 1536, 16 * KiB, 64 * KiB, 4 * KiB, 128),
+        # Even locally, uneven remotely: runs break where the remote step changes.
+        _spaced(8, 2 * KiB, 4, 2 * KiB, 8 * KiB, 8 * KiB, 32 * KiB)
+        + _spaced(8, 2 * KiB, 4, 2 * KiB, 8 * KiB, 8 * KiB, 40 * KiB, 64 * KiB, 512 * KiB),
+        # Two shapes interleaved in the input.
+        [
+            e
+            for pair in zip(
+                _spaced(16, 1 * KiB, 4, 1 * KiB, 2 * KiB, 4 * KiB, 8 * KiB),
+                _spaced(16, 512, 8, 512, 2 * KiB, 4 * KiB, 16 * KiB, 64 * KiB, 256 * KiB),
+            )
+            for e in pair
+        ],
+        # Source blocks overlapping the next one's rows: must not merge.
+        _spaced(16, 1 * KiB, 8, 1 * KiB, 2 * KiB, 8 * KiB, 8 * KiB),
+        # Steps not 4-byte aligned: ROCr refuses, entries fall back one by one.
+        _spaced(16, 256, 4, 256, 1 * KiB, 4 * KiB + 2, 8 * KiB + 2),
+    ],
+    ids=["adjacent", "gaps", "remote_step_changes", "two_shapes", "overlapping", "odd_step"],
+)
+def test_merged_entries(xgmi_engine, entries):
+    """Entries merged into one ROCr copy land exactly where each entry says, shuffled or not."""
+    import random
+
+    src_bytes = max(ro + rows * rp for _, ro, _, rows, _, rp in entries)
+    dst_bytes = max(lo + rows * lp for lo, _, _, rows, lp, _ in entries)
+    src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, DST_GPU, src_bytes, dst_bytes)
+    shuffled = list(entries)
+    random.Random(3).shuffle(shuffled)
+    _check(xgmi_engine, src, dst, src_mem, dst_mem, shuffled)
 
 
 _SDMA_PROBE = """
@@ -478,6 +532,7 @@ XP_ENTRIES = [
     (0, 4 * KiB, 4 * KiB, 512, 4 * KiB, 8 * KiB),  # 2D
     (2 << 20, 4 << 20, 192 * KiB, 4, 192 * KiB, 256 * KiB),  # long rows
     (4 << 20, 1 << 20, 1 << 20, 1, 1 << 20, 1 << 20),  # one row
+    (5 << 20, 0, 1536 * KiB, 2, 1536 * KiB, 2 << 20),  # rows over 1 MiB: 1D on the link engine
 ]
 
 
@@ -487,15 +542,15 @@ def _exchange(obj, rank):
     return out[1 - rank]
 
 
-def _worker(rank, master_port, result_queue):
-    """rank 0 reads (GPU 0); rank 1 holds the source (GPU 1)."""
+def _worker(rank, master_port, result_queue, gpus):
+    """rank 0 reads on gpus[0]; rank 1 holds the source on gpus[1]."""
     try:
         with TorchDistContext(
             rank=rank,
             world_size=2,
             master_addr="localhost",
             master_port=str(master_port),
-            device_id=rank,
+            device_id=gpus[rank],
             backend="gloo",
         ):
             engine = _make_engine(f"strided_xp_{rank}")
@@ -505,10 +560,10 @@ def _worker(rank, master_port, result_queue):
             g = torch.Generator().manual_seed(7)
             src = torch.randint(1, 256, (XP_SRC_BYTES,), dtype=torch.uint8, generator=g)
             if rank == 1:
-                buf = src.to(torch.device("cuda", rank))
+                buf = src.to(torch.device("cuda", gpus[rank]))
             else:
                 buf = torch.zeros(
-                    XP_DST_BYTES, dtype=torch.uint8, device=torch.device("cuda", rank)
+                    XP_DST_BYTES, dtype=torch.uint8, device=torch.device("cuda", gpus[rank])
                 )
             torch.cuda.synchronize()
             mem = engine.register_torch_tensor(buf)
@@ -535,12 +590,17 @@ def _worker(rank, master_port, result_queue):
         result_queue.put(("FAIL", f"{e}\n{traceback.format_exc()}"))
 
 
-def test_cross_process():
+@pytest.mark.parametrize("src_gpu", [1, 2, 3])
+def test_cross_process(src_gpu):
+    """Over IPC, with sources whose pairs land on the reader's and on the source's ROCr
+    queues."""
+    if torch.cuda.device_count() <= src_gpu:
+        pytest.skip(f"needs {src_gpu + 1} GPUs")
     master_port = get_free_port()
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     procs = [
-        ctx.Process(target=_worker, args=(rank, master_port, result_queue))
+        ctx.Process(target=_worker, args=(rank, master_port, result_queue, (0, src_gpu)))
         for rank in range(2)
     ]
     for p in procs:
