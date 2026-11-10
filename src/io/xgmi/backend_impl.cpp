@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -125,7 +126,19 @@ struct TransferCompletion {
     std::lock_guard<std::mutex> lock(eventMu);
     std::call_once(completionOnce, [this]() {
       if (sdmaDone) {
-        while (!sdmaDone()) sched_yield();
+        // A faulted SDMA engine never writes the fence, and ROCr does not know about this queue,
+        // so nothing else reports it.
+        const auto start = std::chrono::steady_clock::now();
+        bool warned = false;
+        while (!sdmaDone()) {
+          if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(10)) {
+            MORI_IO_WARN(
+                "XGMI: strided SDMA copy still not done after 10 s, still waiting; "
+                "MORI_IO_XGMI_SDMA_RECT=0 sends strided copies to hipMemcpy2DAsync instead");
+            warned = true;
+          }
+          sched_yield();
+        }
       }
       hipError_t err = hipEventSynchronize(event);
       if (err == hipSuccess) {
@@ -247,8 +260,13 @@ SdmaRectQueue* XgmiBackendSession::GetSdmaRectQueue() {
   std::call_once(sdmaRectOnce, [this]() {
     char localBusId[64] = {};
     if (remoteBusId.empty() ||
-        hipDeviceGetPCIBusId(localBusId, sizeof(localBusId), localDevice) != hipSuccess)
+        hipDeviceGetPCIBusId(localBusId, sizeof(localBusId), localDevice) != hipSuccess) {
+      MORI_IO_INFO(
+          "XGMI: bus ID of device {} or of the remote GPU ('{}') unknown; strided "
+          "copies use hipMemcpy2DAsync",
+          localDevice, remoteBusId);
       return;
+    }
     sdmaRectQueue = SdmaRectQueue::ForPeer(NormalizeBusId(localBusId), remoteBusId);
   });
   return sdmaRectQueue;
@@ -492,9 +510,8 @@ void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
 void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
                                                const SizeVec& remoteOffsets, const SizeVec& sizes,
                                                const SizeVec& rows, const SizeVec& localPitches,
-                                               const SizeVec& remotePitches,
-                                               TransferStatus* status, TransferUniqueId id,
-                                               bool isRead) {
+                                               const SizeVec& remotePitches, TransferStatus* status,
+                                               TransferUniqueId id, bool isRead) {
   size_t batchSize = sizes.size();
   assert(batchSize == localOffsets.size());
   assert(batchSize == remoteOffsets.size());
@@ -542,8 +559,8 @@ void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
   }
 
   auto fail = [&](const char* what) {
-    status->Update(StatusCode::ERR_GPU_OP, std::string("XGMI: ") + what +
-                                               " failed: " + hipGetErrorString(err));
+    status->Update(StatusCode::ERR_GPU_OP,
+                   std::string("XGMI: ") + what + " failed: " + hipGetErrorString(err));
     eventPool->PutEvent(event, copyDevice);
   };
 
@@ -1071,17 +1088,16 @@ void XgmiBackend::BatchReadWrite(const MemoryDesc& localDest, const SizeVec& loc
 void XgmiBackend::BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
                                         const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
                                         const SizeVec& sizes, const SizeVec& rows,
-                                        const SizeVec& localPitches,
-                                        const SizeVec& remotePitches, TransferStatus* status,
-                                        TransferUniqueId id, bool isRead) {
+                                        const SizeVec& localPitches, const SizeVec& remotePitches,
+                                        TransferStatus* status, TransferUniqueId id, bool isRead) {
   XgmiBackendSession* sess = GetOrCreateSessionCached(localDest, remoteSrc);
   if (sess == nullptr) {
     status->Update(StatusCode::ERR_BAD_STATE, "XGMI: Failed to create session");
     return;
   }
 
-  sess->BatchReadWriteStrided(localOffsets, remoteOffsets, sizes, rows, localPitches,
-                              remotePitches, status, id, isRead);
+  sess->BatchReadWriteStrided(localOffsets, remoteOffsets, sizes, rows, localPitches, remotePitches,
+                              status, id, isRead);
 }
 
 BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const MemoryDesc& remote) {
@@ -1162,10 +1178,9 @@ XgmiBackendSession* XgmiBackend::GetOrCreateSessionCached(const MemoryDesc& loca
     return nullptr;
   }
 
-  auto sess =
-      std::make_unique<XgmiBackendSession>(config, localAddr, remoteAddr, localDevice, remoteDevice,
-                                           ipcSession, this, streamPool.get(), eventPool.get(),
-                                           NormalizeBusId(remote.deviceBusId));
+  auto sess = std::make_unique<XgmiBackendSession>(
+      config, localAddr, remoteAddr, localDevice, remoteDevice, ipcSession, this, streamPool.get(),
+      eventPool.get(), NormalizeBusId(remote.deviceBusId));
 
   XgmiBackendSession* rawPtr = sess.get();
   sessionCache[key] = std::move(sess);

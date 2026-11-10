@@ -33,10 +33,21 @@
 #include <utility>
 
 #include "mori/io/logging.hpp"
+#include "mori/utils/env_utils.hpp"
 
 namespace mori {
 namespace io {
 namespace {
+
+// MORI_IO_XGMI_SDMA_RECT=0 sends every strided copy to hipMemcpy2DAsync.
+bool SdmaRectEnabled() {
+  static const bool enabled = []() {
+    const char* v = mori::env::Get("MORI_IO_XGMI_SDMA_RECT");
+    if (v == nullptr || v[0] == '\0') return true;
+    return mori::env::detail::ParseBool(v).value_or(true);
+  }();
+  return enabled;
+}
 
 // SDMA packets, gfx9 layout (ROCr's amd_blit_sdma.cpp and sdma_registers.h).
 constexpr uint32_t kOpCopy = 1;
@@ -70,8 +81,7 @@ std::vector<HsaIoLinkProperties> IoLinks(uint32_t node) {
   auto props = NodeProperties(node);
   if (!props || props->NumIOLinks == 0) return {};
   std::vector<HsaIoLinkProperties> links(props->NumIOLinks);
-  if (hsaKmtGetNodeIoLinkProperties(node, props->NumIOLinks, links.data()) !=
-      HSAKMT_STATUS_SUCCESS)
+  if (hsaKmtGetNodeIoLinkProperties(node, props->NumIOLinks, links.data()) != HSAKMT_STATUS_SUCCESS)
     return {};
   return links;
 }
@@ -87,8 +97,7 @@ std::optional<uint32_t> GpuNode(const std::string& busId) {
   if (hsaKmtAcquireSystemProperties(&sys) != HSAKMT_STATUS_SUCCESS) return std::nullopt;
   for (uint32_t node = 0; node < sys.NumNodes; ++node) {
     auto props = NodeProperties(node);
-    if (props && props->KFDGpuID != 0 && props->Domain == domain &&
-        props->LocationId == location)
+    if (props && props->KFDGpuID != 0 && props->Domain == domain && props->LocationId == location)
       return node;
   }
   return std::nullopt;
@@ -110,6 +119,13 @@ uint32_t NearestCpuNode(uint32_t gpuNode) {
 
 SdmaRectQueue* SdmaRectQueue::ForPeer(const std::string& localBusId,
                                       const std::string& remoteBusId) {
+  if (!SdmaRectEnabled()) {
+    static std::once_flag logged;
+    std::call_once(logged, []() {
+      MORI_IO_INFO("XGMI: MORI_IO_XGMI_SDMA_RECT=0; strided copies use hipMemcpy2DAsync");
+    });
+    return nullptr;
+  }
   if (!OpenKfd()) {
     static std::once_flag warned;
     std::call_once(warned, []() {
@@ -118,7 +134,12 @@ SdmaRectQueue* SdmaRectQueue::ForPeer(const std::string& localBusId,
     return nullptr;
   }
   auto localNode = GpuNode(localBusId), remoteNode = GpuNode(remoteBusId);
-  if (!localNode || !remoteNode || *localNode == *remoteNode) return nullptr;
+  if (!localNode || !remoteNode) {
+    MORI_IO_INFO("XGMI: no KFD node for GPU {}; strided copies from {} use hipMemcpy2DAsync",
+                 localNode ? remoteBusId : localBusId, remoteBusId);
+    return nullptr;
+  }
+  if (*localNode == *remoteNode) return nullptr;
   auto props = NodeProperties(*localNode);
   if (!props || props->EngineId.ui32.Major != 9) {
     MORI_IO_INFO("XGMI: strided SDMA copies need gfx9 (GPU {}); using hipMemcpy2DAsync",

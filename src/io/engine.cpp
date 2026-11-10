@@ -107,6 +107,25 @@ int DetectNumaNode(void* addr) {
 #endif
 }
 
+// Empty if the strided entries are well formed, else what is wrong with them.
+std::string ValidateStridedEntries(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
+                                   const SizeVec& sizes, const SizeVec& rows,
+                                   const SizeVec& localPitches, const SizeVec& remotePitches) {
+  const size_t n = sizes.size();
+  if (localOffsets.size() != n || remoteOffsets.size() != n || rows.size() != n ||
+      localPitches.size() != n || remotePitches.size() != n) {
+    return "strided entry lists differ in length";
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (rows[i] > 1 && sizes[i] > 0 &&
+        (localPitches[i] < sizes[i] || remotePitches[i] < sizes[i])) {
+      return "strided entry " + std::to_string(i) + ": pitch smaller than row size " +
+             std::to_string(sizes[i]);
+    }
+  }
+  return {};
+}
+
 }  // namespace
 
 /* ---------------------------------------------------------------------------------------------- */
@@ -660,9 +679,8 @@ void IOEngine::BatchRead(const MemDescVec& localDest, const BatchSizeVec& localO
 void IOEngine::BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec& localOffsets,
                                 const MemDescVec& remoteSrc, const BatchSizeVec& remoteOffsets,
                                 const BatchSizeVec& sizes, const BatchSizeVec& rows,
-                                const BatchSizeVec& localPitches,
-                                const BatchSizeVec& remotePitches, TransferStatusPtrVec& status,
-                                TransferUniqueIdVec& ids) {
+                                const BatchSizeVec& localPitches, const BatchSizeVec& remotePitches,
+                                TransferStatusPtrVec& status, TransferUniqueIdVec& ids) {
   MORI_IO_FUNCTION_TIMER;
   size_t batchSize = localDest.size();
   assert(batchSize == remoteSrc.size());
@@ -678,11 +696,18 @@ void IOEngine::BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec&
   for (size_t i = 0; i < batchSize; i++) {
     std::shared_ptr<internal::IoCallDiagnostics> diagnostics;
     internal::ScopedIoCallDiagnosticsCapture capture(&diagnostics, "Engine strided batch read");
+    std::string invalid = ValidateStridedEntries(localOffsets[i], remoteOffsets[i], sizes[i],
+                                                 rows[i], localPitches[i], remotePitches[i]);
+    if (!invalid.empty()) {
+      status[i]->Update(StatusCode::ERR_INVALID_ARGS, invalid);
+      MORI_IO_ERROR("Engine strided batch read: {}", invalid);
+      continue;
+    }
     Backend* backend = nullptr;
     SELECT_BACKEND_AND_RETURN_IF_NONE(localDest[i], remoteSrc[i], status[i], backend);
     backend->BatchReadWriteStrided(localDest[i], localOffsets[i], remoteSrc[i], remoteOffsets[i],
-                                   sizes[i], rows[i], localPitches[i], remotePitches[i],
-                                   status[i], ids[i], true);
+                                   sizes[i], rows[i], localPitches[i], remotePitches[i], status[i],
+                                   ids[i], true);
     if (status[i]->Failed()) {
       LogTransferFailure(diagnostics, "Engine strided batch read error {} message {}",
                          status[i]->CodeUint32(), status[i]->Message());

@@ -44,6 +44,7 @@ from mori.io import (
     IOEngine,
     EngineDesc,
     MemoryDesc,
+    StatusCode,
     XgmiBackendConfig,
     set_log_level,
 )
@@ -60,7 +61,9 @@ KiB = 1024
 def _make_engine(key):
     set_log_level("info")
     engine = IOEngine(key=key, config=IOEngineConfig(host="", port=0))
-    engine.create_backend(BackendType.XGMI, XgmiBackendConfig(num_streams=8, num_events=8))
+    engine.create_backend(
+        BackendType.XGMI, XgmiBackendConfig(num_streams=8, num_events=8)
+    )
     return engine
 
 
@@ -274,7 +277,12 @@ def test_two_batches_one_call(xgmi_engine):
     "size,rows,local_pitch,remote_pitch",
     [
         (384, 2048, 384, 1536),  # expert down_proj shard
-        (768 * KiB, 2, 768 * KiB, 3 * 1024 * KiB),  # wider than one packet (16 Ki elements)
+        (
+            768 * KiB,
+            2,
+            768 * KiB,
+            3 * 1024 * KiB,
+        ),  # wider than one packet (16 Ki elements)
         (4 * 1024 * KiB, 8, 4 * 1024 * KiB, 6 * 1024 * KiB),  # Q blocks of a fused QKV
         (4 * KiB, 20000, 4 * KiB, 8 * KiB),  # more rows than one packet (16 Ki)
         (1, 100, 1, 4),  # 1-byte elements
@@ -317,6 +325,62 @@ def test_unaligned_offsets(xgmi_engine):
     )
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        (0, 0, 4 * KiB, 4, 4 * KiB, 2 * KiB),  # remote pitch < row, SDMA-expressible
+        (0, 0, 4 * KiB, 4, 2 * KiB, 8 * KiB),  # local pitch < row: rows would overlap
+        (0, 0, 4098, 4, 4098, 2050),  # unaligned, would have gone to hipMemcpy2DAsync
+    ],
+)
+def test_pitch_smaller_than_row_rejected(xgmi_engine, entry):
+    """Whichever copy would have taken it, such an entry fails before anything is copied."""
+    src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, DST_GPU, 1 << 20, 1 << 20)
+    status = _read(xgmi_engine, dst_mem, src_mem, [entry])
+    assert status.Code() == StatusCode.ERR_INVALID_ARGS, status.Message()
+    assert "pitch smaller than row size" in status.Message()
+    torch.cuda.synchronize(dst.device)
+    assert not dst.cpu().any()
+
+
+def test_mismatched_entry_lists_rejected(xgmi_engine):
+    """Per-entry lists of different lengths fail that batch instead of reading past the end."""
+    src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, DST_GPU, 1 << 20, 1 << 20)
+    uid = xgmi_engine.allocate_transfer_uid()
+    (status,) = xgmi_engine.batch_read_strided(
+        [dst_mem],
+        [[0, 8 * KiB]],
+        [src_mem],
+        [[0, 64 * KiB]],
+        [[4 * KiB, 4 * KiB]],
+        [[2]],
+        [[4 * KiB, 4 * KiB]],
+        [[8 * KiB, 8 * KiB]],
+        [uid],
+    )
+    status.Wait()
+    assert status.Code() == StatusCode.ERR_INVALID_ARGS, status.Message()
+    torch.cuda.synchronize(dst.device)
+    assert not dst.cpu().any()
+
+
+def test_mismatched_batch_lists_raise(xgmi_engine):
+    src, dst, src_mem, dst_mem = _alloc(xgmi_engine, SRC_GPU, DST_GPU, 4 * KiB, 4 * KiB)
+    uid = xgmi_engine.allocate_transfer_uid()
+    with pytest.raises(ValueError):
+        xgmi_engine.batch_read_strided(
+            [dst_mem, dst_mem],
+            [[0]],
+            [src_mem],
+            [[0]],
+            [[KiB]],
+            [[2]],
+            [[KiB]],
+            [[KiB]],
+            [uid],
+        )
+
+
 def test_many_calls_in_flight(xgmi_engine):
     """Overlapping calls whose SDMA packets (one 52-byte packet per entry) wrap the queue's
     1 MiB ring about twice."""
@@ -324,7 +388,9 @@ def test_many_calls_in_flight(xgmi_engine):
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
     )
-    entries = [(i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)]
+    entries = [
+        (i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)
+    ]
     for _ in range(5):
         pending = []
         for b in range(0, n, 62):
@@ -348,7 +414,9 @@ def test_large_batch(xgmi_engine):
     src, dst, src_mem, dst_mem = _alloc(
         xgmi_engine, SRC_GPU, DST_GPU, n * rows * pitch, n * rows * size
     )
-    entries = [(i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)]
+    entries = [
+        (i * rows * size, i * rows * pitch, size, rows, size, pitch) for i in range(n)
+    ]
     _check(xgmi_engine, src, dst, src_mem, dst_mem, entries)
 
 
@@ -365,19 +433,38 @@ _check(engine, src, dst, src_mem, dst_mem, [(0, 0, 4096, 512, 4096, 8192)])
     or not torch.cuda.get_device_properties(DST_GPU).gcnArchName.startswith("gfx9"),
     reason="SDMA rect copies need gfx9",
 )
-def test_uses_sdma_queue():
-    """Strided entries reach the pair's SDMA queue rather than silently falling back. The
-    queue logs once, when the process creates it, hence a fresh process."""
+@pytest.mark.parametrize(
+    "sdma_env,expected_log",
+    [
+        (None, "strided SDMA copies for"),
+        ("0", "MORI_IO_XGMI_SDMA_RECT=0; strided copies use hipMemcpy2DAsync"),
+    ],
+)
+def test_uses_sdma_queue(sdma_env, expected_log):
+    """Strided entries reach the pair's SDMA queue rather than silently falling back, unless
+    MORI_IO_XGMI_SDMA_RECT=0. The queue logs once, when the process creates it, hence a fresh
+    process. The level comes from the environment because set_log_level does not reach the
+    loggers inside libmori_io."""
     import os
     import subprocess
     import sys
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    env = {**os.environ, "MORI_IO_LOG_LEVEL": "info"}
+    env.pop("MORI_IO_XGMI_SDMA_RECT", None)
+    if sdma_env is not None:
+        env["MORI_IO_XGMI_SDMA_RECT"] = sdma_env
     out = subprocess.run(
-        [sys.executable, "-c", _SDMA_PROBE], cwd=root, capture_output=True, text=True, timeout=300
+        [sys.executable, "-c", _SDMA_PROBE],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
-    assert out.returncode == 0, out.stderr[-2000:]
-    assert "strided SDMA copies for" in out.stdout + out.stderr, (out.stdout + out.stderr)[-2000:]
+    log = out.stdout + out.stderr
+    assert out.returncode == 0, log[-2000:]
+    assert expected_log in log, log[-2000:]
 
 
 # ---------------------------------------------------------------------------

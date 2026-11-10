@@ -235,6 +235,20 @@ class IOEngine:
         remote_pitches,
         transfer_uid,
     ):
+        batch = (
+            local_dest_mem_desc,
+            local_offsets,
+            remote_src_mem_desc,
+            remote_offsets,
+            rows,
+            local_pitches,
+            remote_pitches,
+            transfer_uid,
+        )
+        if any(len(b) != len(sizes) for b in batch):
+            raise ValueError(
+                "batch_read_strided: every argument needs one item per batch"
+            )
         transfer_status = [mori_cpp.TransferStatus() for _ in range(len(sizes))]
         self._engine.BatchReadStrided(
             local_dest_mem_desc,
