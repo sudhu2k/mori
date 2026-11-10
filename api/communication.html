@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Communication APIs &mdash; MORI development (cf77a37b) documentation</title>
+  <title>Communication APIs &mdash; MORI development (eea28ff6) documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../_static/jquery.js?v=5d32c60e"></script>
       <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../_static/documentation_options.js?v=09c6b910"></script>
+      <script src="../_static/documentation_options.js?v=d7e7685e"></script>
       <script src="../_static/doctools.js?v=9bcbadda"></script>
       <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../_static/js/theme.js"></script>
@@ -190,6 +190,18 @@
 <li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-GUIDE.html#environment-variables">9. Environment Variables</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html">MORI Fused GEMM + Collective Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#performance-at-a-glance">Performance at a glance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#what-every-operator-has-in-common">What every operator has in common</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-reduce-and-reduce-scatter">GEMM + all-reduce and reduce-scatter</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-to-all">GEMM + all-to-all</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-gather">GEMM + all-gather</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#all-gather-gemm">All-gather + GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#all-to-all-gemm">All-to-all + GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-CCO-FUSED-OPS-GUIDE.html#running-the-tests-and-benchmarks">Running the tests and benchmarks</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="../MORI-IR-GUIDE.html">MORI-IR Guide</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IR-GUIDE.html#table-of-contents">Table of Contents</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IR-GUIDE.html#architecture">Architecture</a></li>
@@ -226,8 +238,12 @@
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#python-api-quick-reference">Python API Quick Reference</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#example-basic-read-write">Example: Basic Read/Write</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#environment-configuration">Environment &amp; Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#simulation-mode">Simulation Mode</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#profiling-mori-io-with-roctx-markers">Profiling MORI-IO with ROCTX Markers</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#source-files">Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../MORI-IO-GUIDE.html#source-files">Source Files</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../MORI-IO-GUIDE.html#nic-fault-injection-test-builds">NIC fault injection (test builds)</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html">MORI UMBP Single-Node Smoke Test</a><ul>
@@ -241,6 +257,16 @@
 <li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#launch-steps">Launch Steps</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#core-dumps">Core Dumps</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../MORI-UMBP-SINGLE-NODE-GUIDE.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../umbp-simulation.html">UMBP storage and transfer simulation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../umbp-simulation.html#enable">Enable</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../umbp-simulation.html#standalone-ci">Standalone / CI</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../umbp-simulation.html#profile-and-model">Profile and model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../umbp-simulation.html#cross-peer-sharing">Cross-peer sharing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../umbp-simulation.html#timing-and-limits">Timing and limits</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="../PROFILER.html">MORI-VIZ (Visualizer)</a><ul>
@@ -289,19 +315,6 @@
 <li class="toctree-l3"><a class="reference internal" href="../MORI-EP-BENCHMARK.html#analyzing-traces-with-analyze-ep-kernel-trace-py">Analyzing traces with <code class="docutils literal notranslate"><span class="pre">analyze_ep_kernel_trace.py</span></code></a></li>
 </ul>
 </li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html">MORI GEMM + All-Reduce Benchmark</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#table-of-contents">Table of Contents</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#summary">Summary</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#running-the-benchmark">Running the benchmark</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#modes-and-quantisation">Modes and quantisation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#the-fp8-wire-s-knobs">The fp8 wire’s knobs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#the-gemm-on-its-own">The GEMM on its own</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#measurement-discipline">Measurement discipline</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../MORI-GEMM-AR-BENCHMARK.html#reproducing-the-end-to-end-numbers">Reproducing the end-to-end numbers</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="../MORI-IO-BENCHMARK.html">MORI-IO Benchmark</a><ul>
@@ -469,7 +482,10 @@
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Communication APIs</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#mori-ep-expert-parallelism">MORI-EP (Expert Parallelism)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#mori-ep-expert-parallelism">MORI-EP (Expert Parallelism)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#asyncll-v2-sdma-overlap">AsyncLL v2 SDMA overlap</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="#mori-shmem-symmetric-memory">MORI Shmem (Symmetric Memory)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#mori-io-point-to-point-i-o">MORI-IO (Point-to-Point I/O)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#mori-ir-device-bitcode-integration">MORI-IR (Device Bitcode Integration)</a></li>
@@ -604,6 +620,79 @@
 </tbody>
 </table>
 <p>See <a class="reference internal" href="../MORI-EP-GUIDE.html"><span class="doc">MORI-EP Guide</span></a> for full API reference.</p>
+<section id="asyncll-v2-sdma-overlap">
+<h3>AsyncLL v2 SDMA overlap<a class="headerlink" href="#asyncll-v2-sdma-overlap" title="Link to this heading"></a></h3>
+<p>The HIP backend of <code class="docutils literal notranslate"><span class="pre">mori.ops.dispatch_combine_v2</span></code> supports
+<code class="docutils literal notranslate"><span class="pre">async_ll=True,</span> <span class="pre">async_ll_transport=&quot;sdma&quot;</span></code>. Run independent computation
+between <code class="docutils literal notranslate"><span class="pre">dispatch_send()</span></code> and <code class="docutils literal notranslate"><span class="pre">dispatch_recv()</span></code>, and between
+<code class="docutils literal notranslate"><span class="pre">combine_send()</span></code> and <code class="docutils literal notranslate"><span class="pre">combine_recv()</span></code>. Receive data and counts are ready
+after the corresponding receive phase completes on the stream.</p>
+<p>SDMA queues are shared per GPU pair by all ops in a process. When two ops
+interleave on one stream (single-stream two-batch overlap), set
+<code class="docutils literal notranslate"><span class="pre">async_ll_own_sdma_queue=True</span></code> on both so a receive does not wait for the
+other op’s send. When the ops run on separate streams the option is not a
+clear win: a two-op microbenchmark gets slower, while DeepSeek-V4 prefill with
+two-stream two-batch overlap got faster. It is off by default; measure your
+workload before turning it on there. Only the <code class="docutils literal notranslate"><span class="pre">&quot;sdma&quot;</span></code> transport uses it.</p>
+<p>On a single gfx950 or gfx1250 node, the send phase now posts each payload followed by
+its ready notification on the same SDMA queue. The receive phase still waits
+for outgoing copies before the source buffers can be reused. Zero-token peers
+also exchange notifications. The redundant dispatch receive-count reset is
+omitted because the receive copy writes the total, including zero.</p>
+<p>These options are read once when an op is constructed:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Environment variable</p></th>
+<th class="head"><p>Default and effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MORI_ASYNCLL_EARLY_NOTIFY</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code> on single-node gfx950 and gfx1250 SDMA; <code class="docutils literal notranslate"><span class="pre">0</span></code> elsewhere. Posts
+notifications in the send phase. Other architectures can opt in with
+<code class="docutils literal notranslate"><span class="pre">1</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MORI_ASYNCLL_SKIP_RESET</span></code></p></td>
+<td><p>No longer has an effect. It skipped the host-side <code class="docutils literal notranslate"><span class="pre">total_recv</span></code> reset
+before each dispatch; that reset has been removed for every kernel
+family (the dispatch kernels now produce the count themselves), and
+AsyncLL’s receive copy always assigned it. Still accepted, so existing
+settings do not fail.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MORI_ASYNCLL_FUSED_RECV</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code>. Set <code class="docutils literal notranslate"><span class="pre">1</span></code> to fold receive waits into the copy passes. One wave
+per CTA waits, then an acquire and CTA barrier release the copy waves.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MORI_ASYNCLL_FUSED_RECV_CTAS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code>, meaning half the compute units this process may use: the
+device’s, or its share under <code class="docutils literal notranslate"><span class="pre">HSA_CU_MASK</span></code>. Grid ceiling for the
+fused receive copies; ignored unless <code class="docutils literal notranslate"><span class="pre">MORI_ASYNCLL_FUSED_RECV=1</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+<p>The first three variables accept <code class="docutils literal notranslate"><span class="pre">0</span></code> or <code class="docutils literal notranslate"><span class="pre">1</span></code>. Skipping the reset or fusing
+receive requires early notification. Set all three to <code class="docutils literal notranslate"><span class="pre">0</span></code> for the legacy sequence.
+LSA and multi-node ops retain their existing protocol and ignore these SDMA
+options. The resolved notification mode is part of every native Plan’s
+configuration and generated source, so different ops can coexist without
+changing the protocol of an already constructed Plan.</p>
+<p>The default targets single-node gfx950 and gfx1250 overlap. On MI355X (gfx950,
+EP8, hidden 7168, top-6), early notification beat the legacy sequence at every
+token count from 128 to 4096: by 2-5% on one stream and 3-11% with two
+overlapping streams. Receive fusion remains opt-in because its additional
+benefit depends on the token count and compute window.</p>
+<p>Receive fusion is a single-stream optimisation. A fused receive copy waits for
+its peers inside every CTA, so its whole grid stays resident for the wait. When
+two micro-batches overlap on two streams (two-batch overlap), that grid can
+crowd out the send pass the other stream must run before any peer’s wait can
+end, and the ranks deadlock. The grid ceiling makes this unlikely but cannot
+rule it out: it is sized from the compute units the process may use, not from
+those another stream, kernel or process is occupying at the time.</p>
+<p>Do not combine receive fusion with micro-batches on two streams, especially
+when the device may be shared. On MI355X, two streams gained nothing from
+fusion over early notification, so dual-stream callers should use early
+notification alone, which is the gfx950 default.</p>
+</section>
 </section>
 <section id="mori-shmem-symmetric-memory">
 <h2>MORI Shmem (Symmetric Memory)<a class="headerlink" href="#mori-shmem-symmetric-memory" title="Link to this heading"></a></h2>
@@ -884,7 +973,7 @@ into GPU kernel frameworks (Triton, FlyDSL, MLIR, custom HIP, etc.).</p>
 
   <div role="contentinfo">
     <p>&#169; Copyright 2026, AMD.
-      <span class="lastupdated">Last updated on 2026-10-15.
+      <span class="lastupdated">Last updated on 2026-11-10.
       </span></p>
   </div>
 

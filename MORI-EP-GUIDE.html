@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MORI-EP User Guide &mdash; MORI development (cf77a37b) documentation</title>
+  <title>MORI-EP User Guide &mdash; MORI development (eea28ff6) documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=09c6b910"></script>
+      <script src="_static/documentation_options.js?v=d7e7685e"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -190,6 +190,18 @@
 <li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#environment-variables">9. Environment Variables</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html">MORI Fused GEMM + Collective Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#performance-at-a-glance">Performance at a glance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#what-every-operator-has-in-common">What every operator has in common</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-reduce-and-reduce-scatter">GEMM + all-reduce and reduce-scatter</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-to-all">GEMM + all-to-all</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#gemm-all-gather">GEMM + all-gather</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#all-gather-gemm">All-gather + GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#all-to-all-gemm">All-to-all + GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-FUSED-OPS-GUIDE.html#running-the-tests-and-benchmarks">Running the tests and benchmarks</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="MORI-IR-GUIDE.html">MORI-IR Guide</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IR-GUIDE.html#table-of-contents">Table of Contents</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IR-GUIDE.html#architecture">Architecture</a></li>
@@ -226,8 +238,12 @@
 <li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#python-api-quick-reference">Python API Quick Reference</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#example-basic-read-write">Example: Basic Read/Write</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#environment-configuration">Environment &amp; Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#simulation-mode">Simulation Mode</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#profiling-mori-io-with-roctx-markers">Profiling MORI-IO with ROCTX Markers</a></li>
-<li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#source-files">Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-IO-GUIDE.html#source-files">Source Files</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="MORI-IO-GUIDE.html#nic-fault-injection-test-builds">NIC fault injection (test builds)</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="MORI-UMBP-SINGLE-NODE-GUIDE.html">MORI UMBP Single-Node Smoke Test</a><ul>
@@ -241,6 +257,16 @@
 <li class="toctree-l2"><a class="reference internal" href="MORI-UMBP-SINGLE-NODE-GUIDE.html#launch-steps">Launch Steps</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-UMBP-SINGLE-NODE-GUIDE.html#core-dumps">Core Dumps</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-UMBP-SINGLE-NODE-GUIDE.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="umbp-simulation.html">UMBP storage and transfer simulation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="umbp-simulation.html#enable">Enable</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="umbp-simulation.html#standalone-ci">Standalone / CI</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="umbp-simulation.html#profile-and-model">Profile and model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="umbp-simulation.html#cross-peer-sharing">Cross-peer sharing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="umbp-simulation.html#timing-and-limits">Timing and limits</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="PROFILER.html">MORI-VIZ (Visualizer)</a><ul>
@@ -289,19 +315,6 @@
 <li class="toctree-l3"><a class="reference internal" href="MORI-EP-BENCHMARK.html#analyzing-traces-with-analyze-ep-kernel-trace-py">Analyzing traces with <code class="docutils literal notranslate"><span class="pre">analyze_ep_kernel_trace.py</span></code></a></li>
 </ul>
 </li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html">MORI GEMM + All-Reduce Benchmark</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#table-of-contents">Table of Contents</a></li>
-<li class="toctree-l2"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#summary">Summary</a></li>
-<li class="toctree-l2"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#running-the-benchmark">Running the benchmark</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#modes-and-quantisation">Modes and quantisation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#the-fp8-wire-s-knobs">The fp8 wire’s knobs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#the-gemm-on-its-own">The GEMM on its own</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#measurement-discipline">Measurement discipline</a></li>
-<li class="toctree-l2"><a class="reference internal" href="MORI-GEMM-AR-BENCHMARK.html#reproducing-the-end-to-end-numbers">Reproducing the end-to-end numbers</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="MORI-IO-BENCHMARK.html">MORI-IO Benchmark</a><ul>
@@ -469,7 +482,10 @@
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="api/communication.html">Communication APIs</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="api/communication.html#mori-ep-expert-parallelism">MORI-EP (Expert Parallelism)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/communication.html#mori-ep-expert-parallelism">MORI-EP (Expert Parallelism)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/communication.html#asyncll-v2-sdma-overlap">AsyncLL v2 SDMA overlap</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="api/communication.html#mori-shmem-symmetric-memory">MORI Shmem (Symmetric Memory)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/communication.html#mori-io-point-to-point-i-o">MORI-IO (Point-to-Point I/O)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/communication.html#mori-ir-device-bitcode-integration">MORI-IR (Device Bitcode Integration)</a></li>
@@ -1787,7 +1803,7 @@ non-zero if any shape crashes, hangs, or produces wrong output.</p>
 
   <div role="contentinfo">
     <p>&#169; Copyright 2026, AMD.
-      <span class="lastupdated">Last updated on 2026-10-15.
+      <span class="lastupdated">Last updated on 2026-11-10.
       </span></p>
   </div>
 
