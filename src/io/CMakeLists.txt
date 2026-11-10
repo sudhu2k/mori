@@ -24,9 +24,8 @@ target_include_directories(
   mori_io PUBLIC ${CMAKE_SOURCE_DIR}/3rdparty/msgpack-c/include)
 # libibverbs is loaded at runtime via dlopen; embed the shim (hidden visibility)
 # so mori_io's own ibv_* references resolve without linking libibverbs.
-find_package(hsa-runtime64 REQUIRED)
-target_link_libraries(mori_io mori_application hip::host hsa-runtime64::hsa-runtime64
-                      mori_logging mori_ibv_shim)
+target_link_libraries(mori_io mori_application hip::host mori_logging
+                      mori_ibv_shim)
 # With BUILD_RAS=OFF, include/mori/ras/ras.hpp compiles every RAS call in engine.cpp away.
 if(BUILD_RAS)
   target_link_libraries(mori_io mori_ras)
