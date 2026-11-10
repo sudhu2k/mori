@@ -136,7 +136,8 @@ std::string EncodeLogicalCaps(const std::map<std::string, LogicalTierCapacity>& 
     out += std::to_string(logical.capacity.available_bytes) + ':';
     out += std::to_string(logical.capacity.max_allocatable_bytes) + ':';
     out += logical.put_eligible ? "1:" : "0:";
-    out += std::to_string(logical.peak_member_utilization) + ';';
+    out += std::to_string(logical.peak_member_utilization) + ':';
+    out += std::to_string(logical.min_object_bytes) + ';';
   }
   return out;
 }
@@ -166,7 +167,7 @@ std::map<std::string, LogicalTierCapacity> DecodeLogicalCaps(const std::string& 
         fields.push_back(blob.substr(pos, field_end - pos));
         pos = field_end + 1;
       }
-      if (fields.size() != 5 && fields.size() != 6) {
+      if (fields.size() < 5 || fields.size() > 7) {
         throw std::invalid_argument("logical caps");
       }
       pos = record_end + 1;
@@ -176,8 +177,11 @@ std::map<std::string, LogicalTierCapacity> DecodeLogicalCaps(const std::string& 
       logical.capacity.available_bytes = std::stoull(fields[2]);
       logical.capacity.max_allocatable_bytes = std::stoull(fields[3]);
       logical.put_eligible = fields[4] == "1";
-      if (fields.size() == 6) {
+      if (fields.size() >= 6) {
         logical.peak_member_utilization = std::stod(fields[5]);
+      }
+      if (fields.size() == 7) {
+        logical.min_object_bytes = std::stoull(fields[6]);
       }
       caps[name] = logical;
     } catch (const std::exception&) {
@@ -797,6 +801,23 @@ std::vector<std::vector<Location>> RedisMasterMetadataStore::BatchLookupBlockFor
         }
       });
   return out;
+}
+
+void RedisMasterMetadataStore::RecordLocalReads(const std::vector<std::string>& keys,
+                                                std::chrono::system_clock::time_point now) {
+  if (keys.empty()) return;
+  ScopedStoreOp _op(metrics_, "RecordLocalReads");
+  const redis::ShardedBatch batch = redis::GroupKeysByShard(keys_, keys);
+  try {
+    redis::RunShardedRead(
+        batch, redis::kRecordLocalReadsLua, {std::to_string(ToEpochMs(now))}, "RecordLocalReads",
+        fanout_pool_.get(), /*tolerate_shard_failures=*/mode_ != Mode::kSingle, metrics_,
+        [&](size_t group) { return &client_for_shard(batch.shard_of_group[group]); },
+        [](size_t, const RespValue&) {});
+  } catch (const std::exception& e) {
+    // Recency is a hint; losing it must not fail the heartbeat carrying it.
+    MORI_UMBP_WARN("[RedisStore] RecordLocalReads failed: {}", e.what());
+  }
 }
 
 std::vector<bool> RedisMasterMetadataStore::BatchExistsBlock(

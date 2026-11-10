@@ -24,6 +24,7 @@
 #include <infiniband/verbs.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,8 @@ inline constexpr uint16_t kXgmiOnlyFallbackPlaceholderPort = 1;
 }  // namespace internal
 
 void ValidateRdmaTransferConfig(const RdmaBackendConfig& config);
+// Applies the MORI_IO_* env overrides to beConfig, then validates the result.
+RdmaBackendConfig ResolveRdmaBackendConfig(const RdmaBackendConfig& beConfig);
 bool UsesInlineOnly(const RdmaBackendConfig& config);
 int ResolveRequestedNics(const RdmaBackendConfig& config, const TopoKey& local,
                          const TopoKey& remote);
@@ -94,6 +97,9 @@ class RdmaManager {
   // Endpoint management APIs
   int CountEndpoint(EngineKey, TopoKeyPair);
   EpPairVec GetAllEndpoint(EngineKey, TopoKeyPair);
+  // GetAllEndpoint without the endpoints whose QP has been reported failed: an RC QP
+  // in the error state never carries traffic again, so it must not count or be reused.
+  EpPairVec GetLiveEndpoints(EngineKey, TopoKeyPair);
   application::RdmaEndpoint CreateEndpoint(int devId);
   bool DestroyEndpointNoThrow(int devId, const application::RdmaEndpoint& ep) noexcept;
   EndpointId ConnectEndpoint(EngineKey remoteKey, int ldevId, application::RdmaEndpoint local,
@@ -117,6 +123,21 @@ class RdmaManager {
   // to a failed state.
   int FailInFlightTransfers(const QpErrorEvent& event);
 
+  /* -------------------------------- Peer failure -------------------------------- */
+  // Takes the oldest recorded failure; polled by an application thread.
+  bool PopPeerFailure(PeerFailureEvent* out);
+  // False once a failure covering this QP is observed; a slow QP stays alive.
+  bool IsQpAlive(int devId, uint32_t qpNum) const;
+  bool NeedsQpReplacement(int devId, uint32_t qpNum) const;
+  // Records IBV_WC_RETRY_EXC_ERR: the only place peer death is observable.
+  void RecordPeerUnreachable(const EpPair& ep, const char* statusText);
+  // Records any other error completion: the QP is in ERR, but no event is raised.
+  void RecordQpFailed(const EpPair& ep);
+  // Name of an available device; availDevices is fixed, so this takes no lock.
+  std::string DeviceName(int devId) const;
+  // Session admission only: never reject part-way through posting a transfer.
+  bool RejectIfPortDown(const EpPairVec& eps, TransferStatus* status);
+
  private:
   application::RdmaDeviceContext* GetOrCreateDeviceContext(int devId);
 
@@ -137,6 +158,14 @@ class RdmaManager {
   std::unique_ptr<application::TopoSystem> topo{nullptr};
   std::atomic<uint32_t> roundRobinCounter{0};
 
+  // Self-synchronizing, so not guarded by `mu`; its writer threads join first.
+  PeerFailureTracker peerFailures_;
+  bool portDownFailFast_{true};
+  std::unique_ptr<std::atomic<bool>[]> portDown_;
+  std::unique_ptr<std::atomic<uint64_t>[]> portRejected_;
+
+  // Declared last so it is the first member destroyed, and explicitly reset at
+  // the top of ~RdmaManager: the monitor thread calls into peerFailures_.
   std::unique_ptr<RdmaAsyncEventMonitor> asyncEventMonitor_;
 };
 
@@ -284,7 +313,8 @@ class RdmaBackendSession : public BackendSession {
   RdmaBackendSession(const RdmaBackendConfig& config,
                      std::vector<application::RdmaMemoryRegion> localMrPerEp,
                      std::vector<application::RdmaMemoryRegion> remoteMrPerEp, const EpPairVec& eps,
-                     Executor* executor, MemoryLocationType localLoc = MemoryLocationType::CPU);
+                     Executor* executor, RdmaManager* rdma,
+                     MemoryLocationType localLoc = MemoryLocationType::CPU);
   ~RdmaBackendSession() = default;
 
   void ReadWrite(size_t localOffset, size_t remoteOffset, size_t size, TransferStatus* status,
@@ -295,6 +325,7 @@ class RdmaBackendSession : public BackendSession {
                       bool isRead);
 
   bool Alive() const;
+  bool NeedsQpReplacement() const;
 
  private:
   RdmaBackendConfig config{};
@@ -302,6 +333,9 @@ class RdmaBackendSession : public BackendSession {
   std::vector<application::RdmaMemoryRegion> remoteMrPerEp{};
   EpPairVec eps{};
   Executor* executor{nullptr};
+  // Source of QP liveness for Alive(). Null on a default-constructed session,
+  // which reports alive because nothing is known to have failed.
+  RdmaManager* rdma_{nullptr};
   MemoryLocationType localLoc_{MemoryLocationType::CPU};
   std::shared_ptr<std::atomic<bool>> warnedChunkedWorkerFallback_{
       std::make_shared<std::atomic<bool>>(false)};
@@ -337,10 +371,14 @@ class RdmaBackend : public Backend {
   BackendSession* CreateSession(const MemoryDesc& local, const MemoryDesc& remote) override;
   bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id,
                                 TransferStatus* status) override;
+  bool PopPeerFailure(PeerFailureEvent* out) override;
   bool CanHandle(const MemoryDesc& local, const MemoryDesc& remote) const override;
 
  private:
-  void CreateSession(const MemoryDesc& local, const MemoryDesc& remote, RdmaBackendSession& sess);
+  // With paceQpReplacement, building QPs in place of failed ones is refused with
+  // QpReplacementBackoff while PaceQpReplacement says to wait.
+  void CreateSession(const MemoryDesc& local, const MemoryDesc& remote, RdmaBackendSession& sess,
+                     bool paceQpReplacement = false);
   // Session cache helpers
   struct SessionCacheKey {
     EngineKey remoteEngineKey;  // use remote memory's engine key
@@ -378,6 +416,13 @@ class RdmaBackend : public Backend {
       return topoHash ^ (engineHash + 0x9e3779b97f4a7c15ULL + (topoHash << 6) + (topoHash >> 2));
     }
   };
+  struct QpReplacementPacing {
+    std::chrono::steady_clock::time_point lastAt{};
+    std::chrono::milliseconds interval{0};
+  };
+  // Records a replacement of failed QPs to `key` and returns how long the next one waits;
+  // with `enforce`, throws QpReplacementBackoff instead while the last one says to wait.
+  std::chrono::milliseconds PaceQpReplacement(const ConnBuildKey& key, bool enforce);
   RdmaBackendSession* GetOrCreateSessionCached(const MemoryDesc& local, const MemoryDesc& remote);
   void InvalidateSessionsForMemory(MemoryUniqueId id);
   std::shared_ptr<std::mutex> GetConnBuildLock(const EngineKey& remoteEngineKey,
@@ -393,9 +438,19 @@ class RdmaBackend : public Backend {
   // session cache
   std::unordered_map<SessionCacheKey, std::unique_ptr<RdmaBackendSession>, SessionCacheKeyHash>
       sessionCache;
+  // Sessions replaced because one of their QPs failed. GetOrCreateSessionCached hands out
+  // raw pointers that callers use after dropping sessionCacheMu, so these are kept alive.
+  std::vector<std::unique_ptr<RdmaBackendSession>> retiredSessions;
+  // After an attempt to replace a failed session failed (the peer may be gone, or the
+  // replacement backed off), when to try again. Guarded by sessionCacheMu.
+  std::unordered_map<ConnBuildKey, std::chrono::steady_clock::time_point, ConnBuildKeyHash>
+      replaceRetryAt;
   std::mutex sessionCacheMu;
   std::mutex connBuildMapMu_;
   std::unordered_map<ConnBuildKey, std::shared_ptr<std::mutex>, ConnBuildKeyHash> connBuildMu_;
+  // Failed QPs stay allocated, so QPs that fail again soon after being replaced, as on a
+  // path that stays down, are replaced at a growing interval. Guarded by connBuildMapMu_.
+  std::unordered_map<ConnBuildKey, QpReplacementPacing, ConnBuildKeyHash> qpReplacementPacing_;
 };
 
 }  // namespace io

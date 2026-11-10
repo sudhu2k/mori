@@ -555,8 +555,9 @@ def _accum_funcs_int(hidden_elem_size, fp8_direct_cast=False):
 
 
 # Fixed size of the per-block xdb flag counter array for the gather combine entry
-# barrier: one i64 per block. 256 == the CU count (the max combine block_num), so
-# block_num never exceeds it. Deliberately a hard-coded compile-time constant.
+# barrier: one i64 per block. combine block_num must not exceed it: the untuned
+# fallback clamps to tuning_configs._MAX_COMBINE_BLOCKS, which must equal this.
+# Deliberately a hard-coded compile-time constant.
 xdb_flag_slots = 256
 
 
@@ -577,7 +578,6 @@ def make_combine(
     enable_weights=True,
     fp8_direct_cast=False,
     fp4=False,
-    reset_total_recv=True,
     _s3_cache=2,
     _unroll=4,
 ):
@@ -619,7 +619,6 @@ def make_combine(
 
         window = cco.Window(arena)
         rsrc_tok_map = create_buffer_resource_from_addr(addr_tok_map)
-        rsrc_total_recv = create_buffer_resource_from_addr(addr_total_recv)
         rsrc_out = create_buffer_resource_from_addr(addr_out)
         rsrc_xdb_flag = create_buffer_resource_from_addr(addr_xdb_flag)
 
@@ -681,9 +680,6 @@ def make_combine(
         # spin above is a control dependency ordering the gather after the flag.
         # Peer's out_tok is written before its flag push (kernel boundary), so
         # observing the flag implies the data is ready.
-        if const_expr(reset_total_recv):
-            if tid == 0:
-                buffer_store(arith.constant(0), rsrc_total_recv, 0)
 
         rsrc_out_wts = create_buffer_resource_from_addr(addr_out_wts)
 
@@ -952,7 +948,6 @@ def make_combine_scatter(
     fp8_direct_cast=False,
     fp8_blockwise=False,
     scale_dim=0,
-    reset_total_recv=True,
     _s3_cache=2,
 ):
     """Scatter combine (mori useExternalInpBuffer / _nop2p path).
@@ -1195,9 +1190,6 @@ def make_combine_scatter(
             fx.barrier()
             if tid == 0:
                 P.atomic_add_global(fx.Int64(addr_comb_bar), arith.constant(1))
-        if const_expr(reset_total_recv):
-            if tid == 0:
-                buffer_store(arith.constant(0), rsrc_total_recv, 0)
 
         # ── Stage 3: local read of comb_inp + reduce ──
         comb_inp_base = fx.Int64(window.lsa_ptr(my_lsa_rank, off_comb_inp))

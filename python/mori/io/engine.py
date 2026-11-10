@@ -98,9 +98,15 @@ class IOEngine:
                 config = mori_cpp.XgmiBackendConfig()
             elif type is mori_cpp.BackendType.FABRIC:
                 config = mori_cpp.FabricBackendConfig()
+            elif type is mori_cpp.BackendType.OFI:
+                config = mori_cpp.OfiBackendConfig()
+            elif type is mori_cpp.BackendType.TCP:
+                config = mori_cpp.TcpBackendConfig()
             else:
                 raise NotImplementedError("backend not implemented yet")
         result = self._engine.CreateBackend(type, config)
+        if mori_cpp.io_sim_enabled():
+            return result
         if type is mori_cpp.BackendType.XGMI:
             self._load_scatter_gather_kernel()
         elif type is mori_cpp.BackendType.FABRIC:
@@ -261,6 +267,13 @@ class IOEngine:
         if found:
             return transfer_status
         return None
+
+    def pop_peer_failure(self):
+        """Take the oldest pending peer failure, or None if nothing has failed.
+
+        None means nothing has been observed to fail, not that peers are healthy.
+        """
+        return self._engine.PopPeerFailure()
 
     def wait_all(self, statuses, timeout_ms: int = -1) -> "mori_cpp.StatusCode":
         return self._engine.WaitAll(statuses, timeout_ms)

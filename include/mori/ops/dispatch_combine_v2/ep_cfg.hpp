@@ -131,14 +131,6 @@ struct EpArgs {
   // uint8[maxRecv*scaleBytes]. Only read when Cfg.scaleBytes > 0; the arena does
   // not carry the region otherwise, so this stays 0 and nothing dereferences it.
   unsigned long long offOutScales = 0;
-  // Not arena offsets: where the Cfg.selfFirst state lives, EpSelfFirstBytes(worldSize)
-  // laid out from byte 0 of a window of its own, so that whoever lays out the arena
-  // never has to know it exists; mori allocates it per arena (ep_plans.SelfFirstState).
-  // PE p's copy is at sfBase + p * sfStride: the cco flat-VA layout, resolved on the
-  // host so the kernel never loads that window's descriptor on the way to its atomics.
-  // Only read when Cfg.selfFirst, 0 otherwise.
-  unsigned long long sfBase = 0;
-  unsigned long long sfStride = 0;
 
   // Which LSA rank this is. Runtime for the same reason: as a Cfg field it made
   // all eight ranks compile their own copy of an identical kernel.
@@ -159,10 +151,10 @@ struct EpArgs {
   int* combineBarrierFan =
       nullptr;  // [blockNum*16] gfx1250 combine intra-grid fan-out (local scratch)
 
-  // MORI_EP_TOKOFF_EXT only: [worldSize] pointers, entry p = PE p's dispatch slot
-  // allocator word in hipExtMallocWithFlags(Uncached) memory shared by IPC handle,
-  // used instead of the window's offTokOff. Null (the default) keeps the window.
   int* const* tokOffPeers = nullptr;
+  void* stagingBase = nullptr;  // gfx1250 dispatch staging (EpStagingTotalBytes)
+  int* recvToSrc = nullptr;
+  int* recvIdx = nullptr;
 
   int numTokens = 0;  // tokens this rank contributes this call
 };
@@ -183,8 +175,6 @@ struct EpArgs {
   X(offOutTok, "u64")          \
   X(offXdb, "u64")             \
   X(offOutScales, "u64")       \
-  X(sfBase, "u64")             \
-  X(sfStride, "u64")           \
   X(rank, "i32")               \
   X(tokenIndices, "p")         \
   X(inpTokenBuf, "p")          \
@@ -199,6 +189,9 @@ struct EpArgs {
   X(xdbFlag, "p")              \
   X(combineBarrierFan, "p")    \
   X(tokOffPeers, "p")          \
+  X(stagingBase, "p")          \
+  X(recvToSrc, "p")            \
+  X(recvIdx, "p")              \
   X(numTokens, "i32")
 
 #define MORI_EP_ARGS_SCHEMA_ENTRY(name, tag) #name ":" tag ","
@@ -222,7 +215,7 @@ constexpr bool EpArgsOffsetsAscend() {
 
 }  // namespace detail
 
-static_assert(detail::kEpArgsFieldCount == 27,
+static_assert(detail::kEpArgsFieldCount == 28,
               "added an EpArgs field -- add it to MORI_EP_ARGS_FIELDS in the same position "
               "and bump this count");
 static_assert(detail::EpArgsOffsetsAscend(),
@@ -256,14 +249,13 @@ struct EpCfg {
   int scaleBytes = 0;
   bool combineFp4 = false;
   bool combineFp4F32Scale = false;
-  // Dispatch only, gfx125x only (MakeEpCfg): this rank never RMWs its own slot
-  // allocator word. On memory mapped MTYPE_RW, a local RMW on the word the peers'
-  // remote RMWs also hit costs several microseconds per call. The peers' slots are
-  // what their RMWs return, [0, R), with no wait on this rank; its own tokens go to
-  // [R, R + own), R being the sum of what every peer publishes, through the state at
-  // EpArgs::sfBase, once all its blocks have reserved. A late rank therefore holds up
-  // no sender. Off is free for the same reason as scaleBytes.
-  bool selfFirst = false;
+  // combineFp4's push combine with an MXFP8 wire: e4m3 plus one e8m0 scale per 32
+  // elements. Exclusive with combineFp4 (MakeEpCfg).
+  bool combineFp8 = false;
+  bool aggReserve = false;
+  int callTokMax = 0;
+  bool ll128 = false;
+  bool ll128CombineOnly = false;
 };
 
 template <typename Self, typename Visit>
@@ -283,11 +275,15 @@ inline void VisitFields(Self& c, const EpCfg& d, Visit&& v) {
   MORI_FIELD(scaleBytes);
   MORI_FIELD(combineFp4);
   MORI_FIELD(combineFp4F32Scale);
-  MORI_FIELD(selfFirst);
+  MORI_FIELD(combineFp8);
+  MORI_FIELD(aggReserve);
+  MORI_FIELD(callTokMax);
+  MORI_FIELD(ll128);
+  MORI_FIELD(ll128CombineOnly);
 #undef MORI_FIELD
 }
 
-MORI_JIT_ASSERT_FIELD_COUNT(EpCfg, 15, "added an EpCfg field -- update VisitFields(EpCfg) too");
+MORI_JIT_ASSERT_FIELD_COUNT(EpCfg, 19, "added an EpCfg field -- update VisitFields(EpCfg) too");
 
 inline std::string Render(const EpCfg& c) {
   const EpCfg d{};
@@ -351,6 +347,10 @@ constexpr int EpMaxRecv(const EpCfg& c) {
   return c.maxRecv > 0 ? c.maxRecv : c.worldSize * c.maxTokPerRank;
 }
 
+constexpr int EpCallTok(const EpCfg& c) {
+  return c.callTokMax > 0 && c.callTokMax < c.maxTokPerRank ? c.callTokMax : c.maxTokPerRank;
+}
+
 // Combine's shared memory: one pointer array per warp for the topk sources,
 // plus a second one for the weight pointers when weights are enabled.
 constexpr int EpCombineSharedBytes(const EpCfg& c) {
@@ -362,6 +362,35 @@ constexpr int EpTokenBytes(const EpCfg& c) { return c.hiddenDim * EpElemSize(c.d
 
 constexpr int EpCombinePushSlotAlign = 128;
 
+// The push combine: each sender quantizes its rows into the peer's landing zone,
+// and the receiver reduces what landed.
+constexpr bool EpCombinePush(const EpCfg& c) { return c.combineFp4 || c.combineFp8; }
+
+// The push combine's layout in outTok, shared with the host so it sizes the region.
+// After the pull rows: one wire row per token and destination rank, then one u64 flag
+// per row when the overlapped reduce can run.
+constexpr int EpCombinePushRows(const EpCfg& c) {
+  return c.worldSize < c.numExpertPerToken ? c.worldSize : c.numExpertPerToken;
+}
+constexpr int EpCombinePushLandRows(const EpCfg& c) {
+  return c.maxTokPerRank * EpCombinePushRows(c);
+}
+constexpr int EpCombinePushWireBytes(const EpCfg& c) {
+  const int pay = c.combineFp8 ? c.hiddenDim : c.hiddenDim / 2;
+  const int sc = c.combineFp4F32Scale ? c.hiddenDim / 128 * 4 : c.hiddenDim / 32;
+  return (pay + sc + EpCombinePushSlotAlign - 1) / EpCombinePushSlotAlign * EpCombinePushSlotAlign;
+}
+constexpr size_t EpCombinePushLandOff(const EpCfg& c) {
+  return (size_t)EpMaxRecv(c) * EpTokenBytes(c);
+}
+constexpr size_t EpCombinePushFlagOff(const EpCfg& c) {
+  return EpCombinePushLandOff(c) + (size_t)EpCombinePushLandRows(c) * EpCombinePushWireBytes(c);
+}
+// True when some warp count takes the overlapped reduce (EpFp4Ovl), the row flags' user.
+constexpr bool EpCombinePushOvlAny(const EpCfg& c) {
+  return EpCombinePush(c) && !c.combineFp4F32Scale && !EpIsWideEp(c) && c.worldSize >= 4;
+}
+
 // The scale row's SLOT stride: the caller's row padded to 128 B. A transfer is a
 // run of consecutive slots, and TdmWholeOrSplit128 only gives a body to the part
 // of a run that starts aligned -- at the natural 224 B only every 4th one does.
@@ -369,8 +398,6 @@ constexpr int EpCombinePushSlotAlign = 128;
 //
 // Padded on every arch so the destination layout does not fork per arch. The pad
 // is unconditional, so small rows amplify: 224->256 is 1.14x, 32->128 is 4x,
-// 4->128 is 32x, and the gfx1250 staging pool is worldSize^2 * maxTok * THIS per
-// compiled variant. Bounded by the static_assert there, not by this being cheap.
 //
 // Everything reading the destination uses this, not Cfg.scaleBytes; it assumes
 // the arena aligns the region too (SymmArena._ALIGN, checked in hip_backend).
@@ -379,35 +406,40 @@ constexpr int EpScaleStride(const EpCfg& c) {
   return c.scaleBytes <= 0 ? 0 : (c.scaleBytes + EpScaleAlign - 1) / EpScaleAlign * EpScaleAlign;
 }
 
-// The Cfg.selfFirst state, at EpArgs::sfBase: symmetric memory of its own, so
-// nothing else is ever written there, whatever the receive count.
-//   [EpSelfFirstInboxStride * src]  inbox, written by peer src: (call number << 32)
-//                                   | the slots src took in this rank that call
-//   [EpSelfFirstCtrOff]             (arrived blocks << 20) | own tokens reserved so
-//                                   far; this rank's blocks only
-//   [EpSelfFirstSeqOff]             calls completed; equal on every rank because
-//                                   every rank runs every call on the arena
-//   [EpSelfFirstPubOff]             blocks past their reservations this call; the
-//                                   last one publishes to the peers
-// The counter and the ticket each start a 128 B line of their own, so their RMWs
-// never share a line with each other or with the stores peers make into the inbox.
-// The state must be zero when it is allocated and after every collective reset
-// (ep_plans.SelfFirstState does both). self_first_state_bytes() in ep_plans.py is
-// the host-side copy of EpSelfFirstBytes.
-constexpr unsigned long long EpSelfFirstInboxStride = 64;
-constexpr unsigned long long EpSelfFirstLine = 128;
-constexpr unsigned long long EpSelfFirstCtrOff(int worldSize) {
-  return (EpSelfFirstInboxStride * (unsigned long long)worldSize + EpSelfFirstLine - 1) /
-         EpSelfFirstLine * EpSelfFirstLine;
+constexpr int EpPow2Ceil(int v) {
+  int r = 1;
+  while (r < v) r <<= 1;
+  return r;
 }
-constexpr unsigned long long EpSelfFirstSeqOff(int worldSize) {
-  return EpSelfFirstCtrOff(worldSize) + 64;
+constexpr int EpScaleWrap(const EpCfg& c) {
+  return EpPow2Ceil(c.aggReserve ? EpCallTok(c) : EpMaxRecv(c));
 }
-constexpr unsigned long long EpSelfFirstPubOff(int worldSize) {
-  return EpSelfFirstCtrOff(worldSize) + EpSelfFirstLine;
+constexpr int EpScaleRows(const EpCfg& c) {
+  return c.aggReserve ? 2 * EpScaleWrap(c) : EpMaxRecv(c);
 }
-constexpr unsigned long long EpSelfFirstBytes(int worldSize) {
-  return EpSelfFirstPubOff(worldSize) + EpSelfFirstLine;
+
+// The Cfg.aggReserve state, a module global of the dispatch kernel (_resState in
+// ep_intranode_1250x.hpp); this rank's blocks are the only ones that touch it.
+//   [0]                           calls completed: the number the next call publishes
+//                                 under is one more
+//   [EpResCntOff + 4 * dst]       (blocks arrived << 20) | this rank's tokens for dst
+//                                 so far this call
+//   [EpResPubOff(ws) + 64 * dst]  (call number << 32) | the first slot reserved at dst
+//                                 this call, stored by the last block to arrive
+// Each part starts a 128 B line of its own and the published words are 64 B apart,
+// so the blocks waiting on one destination poll a word nothing else writes.
+// The last block to arrive puts the counts and the barrier counter back to zero, and a
+// published word only counts once it carries this call's number, so nothing has to be
+// cleared between calls.
+constexpr unsigned long long EpResLine = 128;
+constexpr unsigned long long EpResPubStride = 64;
+constexpr unsigned long long EpResCntOff = EpResLine;
+constexpr unsigned long long EpResPubOff(int worldSize) {
+  return EpResCntOff +
+         (4ull * (unsigned long long)worldSize + EpResLine - 1) / EpResLine * EpResLine;
+}
+constexpr unsigned long long EpResStateBytes(int worldSize) {
+  return EpResPubOff(worldSize) + EpResPubStride * (unsigned long long)worldSize;
 }
 
 // gfx1250 launch LDS. Dispatch stages one token tile per warp through the TDM
@@ -423,6 +455,112 @@ constexpr int EpCombine1250xLdsBudget = Ep1250xLdsBytes;
 // block is the only writer of its own epoch. 256 == the CU count, which caps the
 // combine block_num; the host allocates this many and every call keeps them in step.
 constexpr int EpXdbFlagSlots = 256;
+
+// ---------------------------------------------------------------------------
+// Staging layout for the gfx1250 dispatch kernel.  The six __device__ globals
+// in ep_intranode_1250x.hpp are replaced by one dynamically-allocated buffer;
+// these functions compute the byte offset of each sub-array within it.
+//
+// The buffer is local scratch (not P2P-visible), allocated once per op
+// instance and shared by all dispatch schedule variants (they are mutually
+// exclusive).  Combine does not use it.
+// ---------------------------------------------------------------------------
+constexpr int EpStagingMaxTopk = 16;
+constexpr int EpStagingMaxBlocks = 512;
+
+constexpr size_t EpAlignUp128(size_t x) { return (x + 127) & ~(size_t)127; }
+
+constexpr size_t EpStagingPoolSlots(const EpCfg& c) { return (size_t)c.worldSize * EpMaxRecv(c); }
+
+constexpr size_t EpStagingIdxOffset(const EpCfg&) { return 0; }
+constexpr size_t EpStagingIdxBytes(const EpCfg& c) {
+  return EpStagingPoolSlots(c) * EpStagingMaxTopk * sizeof(int32_t);
+}
+
+constexpr size_t EpStagingWtOffset(const EpCfg& c) {
+  return EpAlignUp128(EpStagingIdxOffset(c) + EpStagingIdxBytes(c));
+}
+constexpr size_t EpStagingWtBytes(const EpCfg& c) {
+  return EpStagingPoolSlots(c) * EpStagingMaxTopk * sizeof(float);
+}
+
+constexpr size_t EpStagingSrcOffset(const EpCfg& c) {
+  return EpAlignUp128(EpStagingWtOffset(c) + EpStagingWtBytes(c));
+}
+constexpr size_t EpStagingSrcBytes(const EpCfg& c) {
+  return EpStagingPoolSlots(c) * sizeof(int32_t);
+}
+
+constexpr size_t EpStagingBlkBaseOffset(const EpCfg& c) {
+  return EpAlignUp128(EpStagingSrcOffset(c) + EpStagingSrcBytes(c));
+}
+constexpr size_t EpStagingBlkBaseBytes(const EpCfg& c) {
+  return (size_t)EpStagingMaxBlocks * c.worldSize * sizeof(int32_t);
+}
+
+constexpr size_t EpStagingBlkCountOffset(const EpCfg& c) {
+  return EpAlignUp128(EpStagingBlkBaseOffset(c) + EpStagingBlkBaseBytes(c));
+}
+constexpr size_t EpStagingBlkCountBytes(const EpCfg& c) {
+  return (size_t)EpStagingMaxBlocks * c.worldSize * sizeof(int32_t);
+}
+
+constexpr size_t EpStagingScaleOffset(const EpCfg& c) {
+  return EpAlignUp128(EpStagingBlkCountOffset(c) + EpStagingBlkCountBytes(c));
+}
+constexpr size_t EpStagingScaleBytes(const EpCfg& c) {
+  return c.scaleBytes <= 0 ? 0 : (size_t)c.worldSize * EpScaleRows(c) * EpScaleStride(c);
+}
+
+// The scale region is the only one a Cfg can switch off; blkBase and blkCount are
+// EpStagingMaxBlocks * worldSize regardless, so the total is never zero and the
+// caller always has something to allocate.
+constexpr size_t EpStagingTotalBytes(const EpCfg& c) {
+  return EpAlignUp128(EpStagingScaleOffset(c) + EpStagingScaleBytes(c));
+}
+
+// ---------------------------------------------------------------------------
+// Arena region sizes, reported through plan info (ep_spec.cpp). dispOut and outScales
+// are sized by the dispatch Cfg, outTok by the combine one; the arena takes the largest
+// any plan asks for. None depends on geometry, so one arena serves every variant.
+// ---------------------------------------------------------------------------
+constexpr size_t EpLl128StageBytes(const EpCfg& c) {
+  const size_t row =
+      ((size_t)EpTokenBytes(c) + EpScaleStride(c) + 4 + 8 * (size_t)c.numExpertPerToken + 127) /
+      128 * 128;
+  return 512 + 256 + 2 * (size_t)c.worldSize * 128 + 2 * (size_t)c.worldSize * 512 * row;
+}
+constexpr int EpLl128LandRowBytes(const EpCfg& c) {
+  const int data = EpCombinePush(c)
+                       ? (c.combineFp8 ? c.hiddenDim : c.hiddenDim / 2) + c.hiddenDim / 32
+                       : EpTokenBytes(c) + 8 * ((c.numExpertPerToken + 1) / 2);
+  return ((data + 119) / 120 + 7) / 8 * 1024;
+}
+constexpr size_t EpRegionTokOffBytes(const EpCfg&) { return 4; }
+constexpr size_t EpRegionTokOff1250xBytes(const EpCfg& c) {
+  return c.worldSize <= 8 ? 256 + 4 * (size_t)c.worldSize * c.worldSize : EpRegionTokOffBytes(c);
+}
+// Two words per source: the count, and the push combine's landing offset.
+constexpr size_t EpRegionRecvNumBytes(const EpCfg& c) { return 8 * (size_t)c.worldSize; }
+constexpr size_t EpRegionRecvToSrcBytes(const EpCfg& c) { return (size_t)EpMaxRecv(c) * 4; }
+constexpr size_t EpRegionOutIdxBytes(const EpCfg& c) {
+  return (size_t)EpMaxRecv(c) * c.numExpertPerToken * 4;
+}
+constexpr size_t EpRegionOutWtsBytes(const EpCfg& c) { return EpRegionOutIdxBytes(c); }
+constexpr size_t EpRegionDispOutBytes(const EpCfg& c) {
+  return (size_t)EpMaxRecv(c) * EpTokenBytes(c);
+}
+constexpr size_t EpRegionOutTokBytes(const EpCfg& c) {
+  if (c.ll128 || c.ll128CombineOnly)
+    return EpCombinePushLandOff(c) + (size_t)EpCombinePushLandRows(c) * EpLl128LandRowBytes(c);
+  if (!EpCombinePush(c)) return EpCombinePushLandOff(c);
+  return EpCombinePushFlagOff(c) +
+         (EpCombinePushOvlAny(c) ? (size_t)EpCombinePushLandRows(c) * 8 : 0);
+}
+constexpr size_t EpRegionXdbBytes(const EpCfg& c) { return 8 * (size_t)c.worldSize; }
+constexpr size_t EpRegionOutScalesBytes(const EpCfg& c) {
+  return (size_t)EpMaxRecv(c) * EpScaleStride(c);
+}
 
 // Per-warp LDS slab. The metadata tile and the payload tile share it (same
 // address, different phases), so its size bounds BOTH -- and the metadata batch
@@ -465,9 +603,10 @@ constexpr int EpDispatch1250xLdsBytes(const EpCfg& c) {
 // A Cfg that cannot launch is a host-side error, not a kernel that misbehaves.
 // rank is not checked: it is a launch argument, so the op layer owns that bound.
 constexpr bool EpCfgIsValid(const EpCfg& c) {
-  return c.worldSize > 0 && c.hiddenDim > 0 && c.maxTokPerRank > 0 && c.numExpertPerToken > 0 &&
-         c.numExpertPerRank > 0 && c.blockNum > 0 && (c.waveSize == 32 || c.waveSize == 64) &&
-         c.warpPerBlock > 0 && EpBlockThreads(c) <= 1024 &&
+  return c.worldSize > 0 && c.hiddenDim > 0 && c.maxTokPerRank > 0 && c.callTokMax >= 0 &&
+         c.numExpertPerToken > 0 && c.numExpertPerRank > 0 && c.blockNum > 0 &&
+         (c.waveSize == 32 || c.waveSize == 64) && c.warpPerBlock > 0 &&
+         EpBlockThreads(c) <= 1024 &&
          // The recv capacity must cover the worst case: the device slot counter is
          // unbounded, and since EpMaxRecv is also the flat-index stride an overflow
          // re-encodes to the next peer and combine folds in a stranger's token.
@@ -481,11 +620,9 @@ constexpr bool EpCfgIsValid(const EpCfg& c) {
          (EpTokenBytes(c) % 16) == 0 &&
          // Scale rows are copied as dwords, so the row must be dword-sized.
          c.scaleBytes >= 0 && (c.scaleBytes % 4) == 0 &&
-         // selfFirst: warp 1 takes this rank's own-token step while warp 0 issues
-         // the remote reservations, and one lane per peer publishes what this rank
-         // took there. The arrival count packs into 12 bits of the counter word.
-         (!c.selfFirst ||
-          (c.warpPerBlock >= 2 && c.worldSize <= c.waveSize && c.blockNum < 4096));
+         // aggReserve: lane p of warp 0 reserves destination p, and the blocks
+         // arrived pack into the 12 bits above the 20-bit total of a count word.
+         (!c.aggReserve || (c.worldSize <= c.waveSize && c.blockNum < 4096));
 }
 
 }  // namespace v2

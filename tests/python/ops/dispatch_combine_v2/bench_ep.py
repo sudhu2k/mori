@@ -25,11 +25,7 @@ Every backend is driven through EpDispatchCombineOp, so one script covers all of
 them and BACKENDS=flydsl,hip compares them in a single process on one input.
 
 dispatch and combine ALTERNATE, one pair per iteration, because that is the order
-a layer runs them in. Timing N dispatches and then N combines instead leaves
-combine's staging copy unmeasured: combine reads totalRecvTokenNum to size that
-copy and clears it on the way out (ep_intranode_kernel.hpp:343, and
-intranode_kernels.py:1209 for flydsl), so with no dispatch in between only the
-first combine of the loop copies anything.
+a layer runs them in.
 
 dispatch is called with return_routing=True, the way a serving stack calls it, so
 the routing handle is inside the measured window. Each leg gets its own cuda event
@@ -97,29 +93,43 @@ MODES = os.environ.get("MODES", "eager,graph").split(",")
 # copy -- what a real pipeline does. "staged": a separate buffer, copy included.
 COMBINE_IN = os.environ.get("COMBINE_IN", "inplace")
 COMB_MODE = os.environ.get("COMB_MODE", "push")
+# ASYNC_LL=1 benches the AsyncLL family (hip backend) through the ordinary
+# dispatch()/combine() entry points, which run both halves back to back. That is
+# the right comparison against v1's --kernel-type async_ll bench, which likewise
+# times the whole phase; the send/recv seam only pays off with real work in it,
+# and this bench has none to put there.
+ASYNC_LL = int(os.environ.get("ASYNC_LL", 0)) == 1
+# "sdma" (copy engine, overlappable) or "lsa" (peer stores, faster on one node).
+ASYNC_LL_TRANSPORT = os.environ.get("ASYNC_LL_TRANSPORT", "sdma")
 if COMB_MODE not in ("pull", "push"):
     raise ValueError(f"COMB_MODE={COMB_MODE!r}: want pull|push")
 _PUSH = COMB_MODE == "push"
 PUSH_QUANT = os.environ.get("PUSH_QUANT") or "fp4_blockwise"
-if PUSH_QUANT not in ("fp4_blockwise", "fp4_blockwise_fp32"):
+if PUSH_QUANT not in ("fp4_blockwise", "fp4_blockwise_fp32", "fp8_blockwise"):
     raise ValueError(
-        f"PUSH_QUANT={PUSH_QUANT!r}: want fp4_blockwise|fp4_blockwise_fp32"
+        f"PUSH_QUANT={PUSH_QUANT!r}: want fp4_blockwise|fp4_blockwise_fp32|fp8_blockwise"
     )
+_PUSH_FP8 = PUSH_QUANT == "fp8_blockwise"
 PUSH_QRULE = os.environ.get("PUSH_QRULE")
 if not PUSH_QRULE:
-    PUSH_QRULE = "mx" if PUSH_QUANT == "fp4_blockwise" else "blk"
-if PUSH_QRULE not in ("mx", "blk"):
-    raise ValueError(f"PUSH_QRULE={PUSH_QRULE!r}: want mx|blk")
+    PUSH_QRULE = "blk" if PUSH_QUANT == "fp4_blockwise_fp32" else "mx"
+if PUSH_QRULE not in ("mx", "blk") or (_PUSH_FP8 and PUSH_QRULE != "mx"):
+    raise ValueError(
+        f"PUSH_QRULE={PUSH_QRULE!r}: want mx|blk (mx only for {PUSH_QUANT})"
+    )
 _PUSH_QGROUP = 32 if PUSH_QRULE == "mx" else 128
-_PUSH_WIRE = (HIDDEN // 2 + HIDDEN // 32 + 127) // 128 * 128
+_PUSH_WIRE = ((HIDDEN if _PUSH_FP8 else HIDDEN // 2) + HIDDEN // 32 + 127) // 128 * 128
 CHECK = int(os.environ.get("CHECK", 1))
 CHECK_REPEAT = int(os.environ.get("CHECK_REPEAT", 0))
 PUSH_QCHECK_DEV = int(os.environ.get("PUSH_QCHECK_DEV", 0))
 # ROUTE=rand (default): TOPK distinct experts per token, drawn at random.
-# ROUTE=ring: ATOM's --fake-eplb placement, where position p = token * TOPK + j lands
-# on rank p % world. With TOPK >= world every token reaches every rank, so the
-# largest SWEEP point fills each receive buffer to exactly its capacity -- the case
-# that overwrites anything parked at the end of the landing zone.
+# ROUTE=ring: position p = token * TOPK + j lands on rank p % world. With TOPK >= world
+# every token reaches every rank, so the largest SWEEP point fills each receive buffer
+# to exactly its capacity -- the case that overwrites anything parked at the end of the
+# landing zone.
+# ROUTE=grouped: group-limited routing (EXPERT_GROUPS=8, TOPK_GROUPS=4 by default), plus
+# SHARED_EXPERTS=1 trailing columns pinned to the token's own rank. At EP4 a token then
+# reaches 2-3 ranks, not every one, and the ranks receive unevenly.
 # ROUTE=noself: rand without the experts of the token's own rank, so no rank
 # receives from itself.
 ROUTE = os.environ.get("ROUTE", "rand")
@@ -210,8 +220,39 @@ def main():
             [torch.randperm(n_experts - EPR, generator=gr)[:TOPK] for _ in range(M)]
         )
         idx = (idx + (idx >= rank * EPR).long() * EPR).to(torch.int32).to(dev)
+    elif ROUTE == "grouped":
+        # A token picks TOPK_GROUPS of EXPERT_GROUPS groups on a ring, then the same
+        # number of experts in each. Its SHARED_EXPERTS columns stay on its own rank.
+        expert_groups = int(os.environ.get("EXPERT_GROUPS", 8))
+        topk_groups = int(os.environ.get("TOPK_GROUPS", 4))
+        shared_experts = int(os.environ.get("SHARED_EXPERTS", 1))
+        routed_topk = TOPK - shared_experts
+        routed_per_rank = EPR - shared_experts
+        experts_per_group = world * routed_per_rank // expert_groups
+        ranks_per_group = max(1, experts_per_group // routed_per_rank)
+        experts_per_group_rank = experts_per_group // ranks_per_group
+        picks_per_group = routed_topk // topk_groups
+        # Tokens interleave over the ranks: rank r holds tokens r, r + world, ...
+        token = rank + torch.arange(M) * world
+        group_slot = torch.arange(topk_groups).view(1, -1, 1)
+        pick = torch.arange(picks_per_group).view(1, 1, -1)
+        # Position on the group ring; its group is group_pos % expert_groups.
+        group_pos = token.view(-1, 1, 1) * topk_groups + group_slot
+        # How many times that group was picked before, so its experts rotate.
+        group_visit = (group_pos // expert_groups) * picks_per_group + pick
+        routed = (
+            (group_pos % expert_groups) * experts_per_group
+            + (group_visit % ranks_per_group) * experts_per_group_rank
+            + (group_visit // ranks_per_group) % experts_per_group_rank
+        ).reshape(M, routed_topk)
+        # Routed expert ids -> dispatch ids, whose ranks hold EPR slots each.
+        routed_ids = (routed // routed_per_rank) * EPR + routed % routed_per_rank
+        shared_ids = (
+            rank * EPR + routed_per_rank + torch.arange(shared_experts)
+        ).expand(M, shared_experts)
+        idx = torch.cat([routed_ids, shared_ids], 1).to(torch.int32).to(dev)
     else:
-        raise ValueError(f"ROUTE={ROUTE!r}: expected rand, ring or noself")
+        raise ValueError(f"ROUTE={ROUTE!r}: expected rand, ring, grouped or noself")
     # Per-token scale rows, transported when SCALE_DIM>0 (fp8/fp4 by default). Shaped
     # exactly as repro_epv2_topk9.py: sc_n_i32 int32 lanes viewed as bytes, trimmed to
     # SCALE_DIM so scale_type_size=1 * scale_dim holds. Deterministic (arange + rank
@@ -233,6 +274,13 @@ def main():
         .scatter_(1, (idx.cpu().long() // EPR), True)
         .sum(1)
     )
+
+    def gather_all(t):
+        parts = [torch.empty_like(t.cpu()) for _ in range(world)]
+        dist.all_gather(parts, t.cpu().contiguous())
+        return torch.stack(parts)
+
+    all_idx, all_wts = gather_all(idx), gather_all(wts)
 
     obj = [cco.Communicator.get_unique_id() if rank == 0 else None]
     dist.broadcast_object_list(obj, src=0)
@@ -259,6 +307,8 @@ def main():
             combine_block_num=_G["CBN"],
             combine_warp_num_per_block=_G["CWPB"],
             quant_type=PUSH_QUANT if _PUSH else "none",
+            async_ll=ASYNC_LL,
+            async_ll_transport=ASYNC_LL_TRANSPORT,
         )
         return EpDispatchCombineOp(cfg, comm)
 
@@ -295,8 +345,10 @@ def main():
         reverse map says a slot came from. That determinism is what makes this
         possible; before the seed was configurable it was not.
         """
-        if not CHECK or total == 0:
+        if not CHECK:
             return 0
+        if total == 0:
+            print(f"[EMPTY] rank {rank} received no token", flush=True)
         tis = routing.disp_tok_id_to_src_tok_id_local[:total].cpu()
         src_pe, src_tok = (tis // M).to(torch.int64), (tis % M).to(torch.int64)
         got = op.recv_tokens()[:total].cpu().view(torch.uint8)
@@ -311,15 +363,74 @@ def main():
                 constant=CONST_VAL,
             ).view(torch.uint8)
             bad += int((got[sel] != ref[src_tok[sel]]).any(dim=1).sum())
-        n = torch.tensor([bad])
+        sbad = sctl = 0
+        if SCALE_DIM:
+            sc_n_i32 = (SCALE_DIM + 3) // 4
+            gs = op.recv_scales()[:total].cpu().contiguous().view(torch.uint8)
+            gs = gs[:, :SCALE_DIM]
+
+            def sref(tok):
+                v = (tok + src_pe * 100003).to(torch.int32).view(-1, 1)
+                return v.repeat(1, sc_n_i32).view(torch.uint8)[:, :SCALE_DIM]
+
+            sbad = int((gs != sref(src_tok)).any(dim=1).sum())
+            sctl = int((gs != sref(src_tok + 1)).any(dim=1).sum())
+        inr = (src_pe >= 0) & (src_pe < world)
+        pe_c = torch.where(inr, src_pe, torch.zeros_like(src_pe))
+        got_i = op.recv_indices()[:total].cpu()
+        got_w = op.recv_weights()[:total].cpu()
+        ibad = int(((got_i != all_idx[pe_c, src_tok]).any(dim=1) | ~inr).sum())
+        wbad = int(((got_w != all_wts[pe_c, src_tok]).any(dim=1) | ~inr).sum())
+        pe_n = (pe_c + 1) % world
+        mctl = int(
+            (
+                (got_i != all_idx[pe_n, src_tok]).any(dim=1)
+                | (got_w != all_wts[pe_n, src_tok]).any(dim=1)
+            ).sum()
+        )
+        n = torch.tensor(
+            [bad, sbad, sctl, total if SCALE_DIM else 0, ibad, wbad, mctl, total]
+        )
         dist.all_reduce(n)
-        if rank == 0 and n.item():
+        if rank == 0 and n[0].item():
             print(
                 f"  [{op.backend_name}] DISPATCH BYTE MISMATCH: "
-                f"{int(n.item())} rows across {world} ranks",
+                f"{int(n[0])} rows across {world} ranks",
                 flush=True,
             )
-        return int(n.item())
+        mt_ok = int(n[4]) == 0 and int(n[5]) == 0 and int(n[6]) == int(n[7])
+        if rank == 0:
+            print(
+                f"  [{op.backend_name}] METACHECK rows={int(n[7])} idx_bad={int(n[4])} "
+                f"wts_bad={int(n[5])} ctl={int(n[6])} ok={int(mt_ok)}",
+                flush=True,
+            )
+            if not mt_ok:
+                print(
+                    f"  [{op.backend_name}] DISPATCH BYTE MISMATCH (ids / weights): "
+                    f"{int(n[4])} / {int(n[5])} rows across {world} ranks, control "
+                    f"{int(n[6])} of {int(n[7])}",
+                    flush=True,
+                )
+        sc_ok = int(n[1]) == 0 and int(n[2]) == int(n[3])
+        if rank == 0 and SCALE_DIM:
+            print(
+                f"  [{op.backend_name}] SCALECHECK rows={int(n[3])} bad={int(n[1])} "
+                f"ctl={int(n[2])} ok={int(sc_ok)}",
+                flush=True,
+            )
+            if not sc_ok:
+                print(
+                    f"  [{op.backend_name}] DISPATCH BYTE MISMATCH (scales): "
+                    f"{int(n[1])} rows across {world} ranks, control {int(n[2])} "
+                    f"of {int(n[3])}",
+                    flush=True,
+                )
+        return (
+            int(n[0])
+            + (0 if sc_ok else max(1, int(n[1])))
+            + (0 if mt_ok else max(1, int(n[4]) + int(n[5])))
+        )
 
     def bf16_payload(pe):
         return _data.make_payload(
@@ -359,6 +470,16 @@ def main():
         sc_byte = torch.pow(2.0, (byte - 127).float())
         return torch.sign(x) * fp4_rne(x.abs() / sc_conv) * sc_byte
 
+    # The e8m0 scale brings the group's amax within e4m3's 448; |x / sc| <= 448
+    # by construction, so the cast never saturates.
+    def push_quant_deq8(x):
+        m15 = (x.to(torch.bfloat16).view(torch.int16).to(torch.int32) & 0x7FFF).amax(
+            dim=-1, keepdim=True
+        )
+        byte = torch.clamp(((m15 + 0x1F) >> 7) - 8, min=1)
+        sc = torch.pow(2.0, (byte - 127).float())
+        return (x / sc).to(torch.float8_e4m3fn).float() * sc
+
     def push_quant_blk(x):
         amax = x.abs().amax(dim=-1, keepdim=True).double()
         pos = amax > 0
@@ -368,6 +489,8 @@ def main():
         return torch.sign(x) * fp4_rne(x.abs() * inv), sc
 
     def push_quant_ref(x, u):
+        if _PUSH_FP8:
+            return (u * push_quant_deq8(x)).to(torch.bfloat16).float()
         if PUSH_QRULE == "mx":
             return (u * push_quant_deq(x)).to(torch.bfloat16).float()
         q, sc = push_quant_blk(x)
@@ -381,7 +504,10 @@ def main():
         grp = x.shape[-1]
         amax = x.abs().amax(dim=2, keepdim=True)
         _, ex = torch.frexp(amax)
-        step = torch.ldexp(torch.ones_like(amax), (ex - 2).clamp(min=-127))
+        # One step bounds the rounding error of the group's largest binade.
+        step = torch.ldexp(
+            torch.ones_like(amax), (ex - (4 if _PUSH_FP8 else 2)).clamp(min=-127)
+        )
         err = (got - u * x).abs()
         tol = u * step + (u * x).abs() * 2.0**-8 + 1e-30
         bad = int((~(err <= tol)).flatten(1).any(dim=1).sum())
@@ -429,7 +555,8 @@ def main():
         if rank == 0:
             print(
                 f"  [PUSHQUANT] ct={ct} x{scale:g} rows={int(n[1])} bad={int(n[0])} "
-                f"max_err={float(m[0]):.3f} steps rule={PUSH_QRULE} exact_bad={int(n[2])}"
+                f"max_err={float(m[0]):.3f} steps rule={PUSH_QRULE} quant={PUSH_QUANT}"
+                f" exact_bad={int(n[2])}"
                 f" nonfinite={int(n[3])}"
                 + (f" dev_diff={int(n[4])}" if PUSH_QCHECK_DEV else "")
                 + "".join(f for f in firsts if f),
@@ -469,7 +596,9 @@ def main():
             buf = op.combine_in_view().clone()[:total]
         else:
             buf = stage
-        out, _ = op.combine(buf, routing=r)
+        out, outw = op.combine(
+            buf, weights=w_ if checked and not _PUSH else None, routing=r
+        )
         lockstep()
         if dispatch_bad:
             return total, buf, False, True
@@ -504,7 +633,23 @@ def main():
                 f"[{int(U[:ct].min())},{int(U[:ct].max())}])",
                 flush=True,
             )
-        return total, buf, bad.item() == 0, True
+        w_ref = wts[:ct].float().cpu()
+        ew = U[:ct].view(ct, 1).float() * w_ref
+        gw = outw.float().cpu()
+        wbad = int((~torch.isclose(gw, ew, rtol=1e-6, atol=1e-7)).any(dim=1).sum())
+        wctl = int(
+            (~torch.isclose(gw, ew + w_ref, rtol=1e-6, atol=1e-7)).any(dim=1).sum()
+        )
+        nw = torch.tensor([wbad, wctl, ct])
+        dist.all_reduce(nw)
+        wt_ok = int(nw[0]) == 0 and int(nw[1]) == int(nw[2])
+        if rank == 0:
+            print(
+                f"  [{op.backend_name}] WTSCHECK rows={int(nw[2])} bad={int(nw[0])} "
+                f"ctl={int(nw[1])} ok={int(wt_ok)}",
+                flush=True,
+            )
+        return total, buf, bad.item() == 0 and wt_ok, True
 
     def time_pairs(mode, one_pair, capture, split_legs):
         """ITERS (dispatch, combine) pairs; mean us per leg.
@@ -981,7 +1126,7 @@ def main():
         # Say what was actually verified. fp4 skips the identity-expert check
         # (hip has no fp4 combine) but its dispatch bytes ARE compared.
         if _PUSH and CHECK and not _data.verifies_nothing(INIT):
-            why = " (push: dispatch bytes + fp4 combine output)"
+            why = f" (push: dispatch bytes + {PUSH_QUANT} combine output)"
         elif _FP4:
             why = " (fp4: dispatch bytes only, combine not compared)"
         elif not CHECK:

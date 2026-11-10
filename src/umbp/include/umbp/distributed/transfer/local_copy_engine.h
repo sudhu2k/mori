@@ -36,6 +36,10 @@ namespace mori::umbp {
 // wants the same cache-bypass behavior.  Honors UMBP_DRAM_NT_COPY=0.
 void HostCopyBlock(void* dst, const void* src, size_t size);
 
+// Shared by real and simulated copies; respects the existing environment knobs.
+int LocalCopyThreadLimit(const char* env_name);
+int LocalCopyThreads(size_t total_bytes, size_t copy_count);
+
 // Declare that copies issued on THIS thread are not on anyone's critical path,
 // so LocalCopyEngine::Submit should run them on the calling thread instead of
 // fanning them out.
@@ -52,7 +56,6 @@ void HostCopyBlock(void* dst, const void* src, size_t size);
 // Thread-local and sticky, so a worker sets it once at start-up rather than
 // around each call.
 void MarkThreadBackgroundCopies();
-bool ThreadDoesBackgroundCopies();
 
 // The both-endpoints-are-local implementation of TransferEngine.
 //
@@ -90,7 +93,7 @@ class LocalCopyEngine final : public TransferEngine {
   // Group by (src base, dst base) and coalesce exactly-contiguous segments, so
   // a multi-page key whose pages happen to be adjacent collapses into one
   // memcpy instead of one per page.
-  TransferPlanSet Plan(const std::vector<TransferItem>& items) const override;
+  std::unique_ptr<TransferPlanBuilder> CreatePlanBuilder(size_t expected_items = 0) const override;
 
   // Performs the copies inline; the returned handle is already settled.
   std::unique_ptr<TransferHandle> Submit(std::vector<TransferPlan> plans) override;

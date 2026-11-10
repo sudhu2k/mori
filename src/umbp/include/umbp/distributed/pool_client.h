@@ -42,10 +42,13 @@
 #include "mori/io/engine.hpp"
 #include "umbp/distributed/config.h"
 #include "umbp/distributed/master/master_client.h"
+#include "umbp/distributed/metrics/activity_summary.h"
 #include "umbp/distributed/metrics/component_metrics.h"
 #include "umbp/distributed/peer/backend/medium_backend.h"
+#include "umbp/distributed/pool_platform.h"
 #include "umbp/distributed/transfer/transfer_engine.h"
 #include "umbp/distributed/types.h"
+#include "umbp/local/host_mem_allocator.h"
 #include "umbp_peer.grpc.pb.h"
 
 namespace mori::umbp {
@@ -56,7 +59,7 @@ class WorkloadTraceRecorder;
 
 class PeerServiceServer;
 class PeerPool;
-class HbmCopyEngine;
+class KvIndexerReporter;
 
 // Short name for log output. Generic FAILED maps to "FAILED" — the
 // detailed reason for that case lives in the peer's allocator log.
@@ -72,10 +75,16 @@ inline const char* OutcomeName(::umbp::AllocateSlotOutcome o) {
       return "FAILED";
     case ::umbp::ALLOCATE_SLOT_OUTCOME_FAILED_NO_SPACE:
       return "NO_SPACE";
+    case ::umbp::ALLOCATE_SLOT_OUTCOME_IN_FLIGHT:
+      return "IN_FLIGHT";
     default:
       return "UNKNOWN";
   }
 }
+
+// The NUMA node of each GPU this process sees, by device ordinal; a GPU with no
+// node is left out.
+std::unordered_map<int, int> GpuNumaNodes();
 
 // In the master-as-advisor design, PoolClient drives the Put/Get
 // pipeline: master gives a routing advisory, then the writer talks
@@ -84,7 +93,7 @@ inline const char* OutcomeName(::umbp::AllocateSlotOutcome o) {
 // allocator outbox is shipped to master via the heartbeat thread.
 class PoolClient {
  public:
-  explicit PoolClient(PoolClientConfig config);
+  explicit PoolClient(PoolClientConfig config, std::shared_ptr<PoolPlatform> platform = nullptr);
   ~PoolClient();
 
   PoolClient(const PoolClient&) = delete;
@@ -122,6 +131,11 @@ class PoolClient {
                       int device = -1, MemoryRegistration mode = MemoryRegistration::kPinned);
 
   void DeregisterMemory(void* ptr);
+
+  // Optional Indexer reporting, configured once at the storage owner.
+  void ConfigureKvIndexer(const KvIndexerConfig& config);
+  KvMetadataPin RegisterKvBlock(const KvBlockMetadata& block);
+  bool FlushKvIndexer();
 
   // Hot paths.  Both retry up to `max_route_retries` times when the
   // chosen peer reports ENOSPC (Put) or unknown-key (Get); each retry
@@ -196,6 +210,9 @@ class PoolClient {
   // whether master surfaced any replica.  No RDMA, no lease bump.
   bool Exists(const std::string& key);
   std::vector<bool> BatchExists(const std::vector<std::string>& keys);
+  // Ahead of a read: local SSD keys are copied into DRAM (PeerPool::Prefetch),
+  // and keys on peers are pulled into this node's medium in the background.
+  size_t BatchPrefetch(const std::vector<std::string>& keys);
 
   MasterClient& Master();
 
@@ -203,6 +220,7 @@ class PoolClient {
   // MediumBackend — no concrete backend type is named outside PoolClient::Init.
   BackendRegistry& Backends();
   TierTransitionMetrics TransitionMetrics() const;
+  LocalEvictionMetrics LocalEvictionStats() const;
   std::map<std::string, uint64_t> TierReadHits() const;
   std::string LogicalTierForBackend(uint32_t backend_id) const;
 
@@ -250,18 +268,33 @@ class PoolClient {
 
  private:
   PoolClientConfig config_;
+  std::shared_ptr<PoolPlatform> platform_;
   std::atomic<bool> initialized_{false};
 
   // Sample every instrumented component on this node — each registered storage
-  // backend, plus the transfer engine — and ship the result.  Registered as a
-  // MasterClient metrics provider, so it runs on the metrics thread and never
-  // on a data-plane path.
+  // backend, plus the transfer engine — and ship the result.  With a master it
+  // is registered as a MasterClient metrics provider and runs on that client's
+  // metrics thread; without one it runs on local_metrics_thread_ below.  Either
+  // way it is a tick, never a data-plane path.
   //
   // There is no per-component code here and no place to add any: a component is
   // a MetricSource, the labels that identify it come from Tier() plus the
   // registry instance name, and MetricPublisher does the differencing. That makes a new backend
   // or a new transfer engine visible in Grafana without touching this file.
   void PublishComponentMetrics();
+
+  // What a master derives from this node's heartbeats -- per-tier capacity,
+  // live key counts, logical-tier eligibility, the client count -- published
+  // directly when there is no master to derive it.  Same metric names and
+  // labels as the master emits, so the same panels read either deployment.
+  void PublishNodeStateGauges();
+
+  // Creates at zero every counter the data path writes directly (the
+  // per-traffic byte counters, ranged install failures), once, before any
+  // traffic.  Those are written on the event itself, so without this a series
+  // would be born holding its first event and rate()/increase() would never
+  // see it.
+  void SeedEventCounters();
 
   // Holds the delta baselines for every component published above, keyed by
   // (component, metric, labels).  Touched once per tick; the counters
@@ -270,11 +303,61 @@ class PoolClient {
 
   std::unique_ptr<MasterClient> master_client_;
 
+  // Where this node's metrics go.  Points at master_client_ when this node has
+  // a master, otherwise at config_.metric_sink (a PrometheusMetricSink owned by
+  // whoever built this client), and is null when neither exists — the case
+  // where metrics are measured and discarded.  Never owns.
+  MetricSink* metric_sink_ = nullptr;
+
+  // Drives PublishComponentMetrics() when there is no MasterClient whose
+  // metrics thread could.  Started by Init only when metric_sink_ is set and
+  // master_client_ is not; joined by Shutdown before the components it samples
+  // are torn down.  Interval comes from UMBP_METRICS_REPORT_INTERVAL_MS, the
+  // same knob the master-backed path uses, so the two tick alike.
+  void LocalMetricsLoop();
+  void StartLocalMetricsReporting();
+  void StopLocalMetricsReporting();
+
+  std::thread local_metrics_thread_;
+  std::atomic<bool> local_metrics_running_{false};
+  std::mutex local_metrics_mu_;
+  std::condition_variable local_metrics_cv_;
+  uint64_t local_metrics_interval_ms_ = 1000;
+
+  // ---- the periodic activity summary ------------------------------------
+  // One INFO line per window saying what this process offloaded, loaded,
+  // evicted, promoted and demoted.  Deliberately NOT tied to the metrics tick
+  // above: that one exists only when there is somewhere to publish (a master,
+  // or a local Prometheus endpoint), and the deployments where this summary
+  // earns its keep are exactly the ones with neither.  It therefore runs in
+  // every deployment, on its own much slower timer.
+  //
+  // Cadence: UMBP_SUMMARY_INTERVAL_MS, default 60000, 0 disables.  Joined by
+  // Shutdown before the backends it samples are destroyed, with a final render
+  // so a short run still reports what it did.
+  void ActivitySummaryLoop();
+  void StartActivitySummary();
+  void StopActivitySummary();
+  // Reads every backend's cumulative counters plus the pool's transition
+  // totals.  Cheap and lock-light — SampleMetrics() is relaxed atomic loads —
+  // but still a tick, never a data-plane path.
+  ActivitySnapshot CollectActivitySnapshot() const;
+  void EmitActivitySummary(double window_seconds);
+
+  ActivitySummary activity_summary_;
+  std::thread summary_thread_;
+  std::atomic<bool> summary_running_{false};
+  std::mutex summary_mu_;
+  std::condition_variable summary_cv_;
+  uint64_t summary_interval_ms_ = 60000;
+  std::chrono::steady_clock::time_point summary_last_;
+
   // Every storage medium live on this node.  Owned here because PoolClient is
   // the natural lifetime anchor for the per-process IO engine + backend pools.
   // MasterClient borrows it for heartbeat aggregation; default_pool_ borrows it
   // for logical placement and peer/local dispatch.
   BackendRegistry registry_;
+  std::shared_ptr<KvIndexerReporter> kv_indexer_;
 
   // The implicit default logical pool. It borrows registry_, owns placement
   // state and policy, and is the dispatch surface for local and peer RPC paths.
@@ -299,9 +382,6 @@ class PoolClient {
   // transport configured, in which case only local transfers are servicable.
   std::unique_ptr<TransferEngine> transfer_engine_;
   PeerDirectory* peer_directory_ = nullptr;
-  // Observer into transfer_engine_'s composite, used only to declare which
-  // host regions the gather kernel may dereference.  Not a second data path.
-  HbmCopyEngine* hbm_engine_ = nullptr;
 
   // Lazy peer connections (one per remote node).  Purely control plane since
   // Phase 6: the peer's engine desc and buffer descriptors moved into
@@ -331,7 +411,11 @@ class PoolClient {
   // offset triple, because whether a transfer needs staging is the transfer
   // layer's decision, not the client's.
   std::pair<TransferRef, uint64_t> UserBufferRef(void* ptr, size_t size) const;
+  TransferRef LocalUserBytes(void* ptr, size_t size) const;
   int PreferredNumaNodeFor(void* ptr, size_t size) const;
+  // The NUMA node a write's source lives on: its GPU's, or the node its registered
+  // host region was placed on; -1 when unknown.
+  int SourceNumaHint(const void* src, size_t size) const;
   std::unordered_map<int, int> gpu_to_numa_;
 
   // Zero-copy registered memory regions, kept sorted by `base`.
@@ -362,11 +446,9 @@ class PoolClient {
   // Single-attempt outcome from a peer call; mapped to PutEntryOutcome
   // by the caller (Partition / Allocate).
   enum class PutAttemptOutcome { kSuccess, kSuccessAlreadyExists, kRetry, kFatal };
-  enum class GetAttemptOutcome { kSuccess, kRetry, kFatal };
 
   PutAttemptOutcome ExecuteLocalPut(const std::string& key, const void* src, size_t size,
                                     TierType tier, const std::string& logical_tier = {});
-  GetAttemptOutcome ExecuteLocalGet(const std::string& key, void* dst, size_t size);
 
   // Resolve `keys` through the PeerPool. On return holders[i] is the
   // backend that owns keys[i] (nullptr when nothing here does) and, when it is
@@ -384,11 +466,19 @@ class PoolClient {
   // destination is device memory -- the only place a file ref can be read.
   // Empty (the default) means the caller cannot consume a file ref at all, so
   // none is requested and every key resolves onto staged pages.
+  //
+  // Each hit's bytes stay put while its resolutions[i].hold lives.  `busy`
+  // receives the candidates a staged medium left for a later call while
+  // serving others; without it, or when nothing was served, they are misses.
+  // `extents` (parallel to `keys`, or null) lets a staging medium publish only
+  // what each reader touches (ResolvedEntry::covered_offset / covered_size).
   void ResolveLocalBatch(const std::vector<std::string>& keys,
                          const std::vector<size_t>& candidates,
                          std::vector<MediumBackend*>* holders,
                          std::vector<ResolvedEntry>* resolutions,
-                         const std::function<bool(size_t)>& dst_is_device = {});
+                         const std::function<bool(size_t)>& dst_is_device = {},
+                         std::vector<size_t>* busy = nullptr,
+                         const std::vector<ObjectExtent>* extents = nullptr);
 
   // One TransferItem per page between a caller buffer and `backend`'s own
   // buffers.  `to_backend` is Put (user -> pages), false is Get (pages -> user).
@@ -452,18 +542,16 @@ class PoolClient {
   // as host bytes, or the engine picks the wrong copy direction.
   bool CopyContiguousToRanges(const TransferRef& src, uint64_t src_base, size_t object_size,
                               const std::vector<ObjectRange>& ranges);
-  bool CopyRangesToContiguous(const std::vector<ObjectRange>& ranges, void* dst,
-                              size_t object_size);
 
-  // Item-building halves of the two copies above.  They append to `items`
+  // Item builders for ranged <-> contiguous copies.  They append to `items`
   // instead of transferring, so a caller with MANY objects can issue ONE
   // Transfer for all of them.
   //
   // This is the difference between the local and remote ranged paths, and it
   // was worth ~65% of remote transfer time: ExecuteLocalPutRangesBatch
   // accumulates every request's items and transfers once, while the remote
-  // arena loop called CopyRangesToContiguous per key -- one blocking transfer,
-  // one kernel launch and one hipStreamSynchronize EACH.  Measured on an
+  // arena loop used to copy per key -- one blocking transfer, one kernel
+  // launch and one hipStreamSynchronize EACH.  Measured on an
   // 8-rank embedded deployment: 369 transfers carrying 369 segments, 14.5 us
   // apiece, of which only ~5 us was the copy.
   //
@@ -541,6 +629,9 @@ class PoolClient {
   // blocks, the read that scheduled it.
   void MaybePrefetchWholeObject(const std::string& key, size_t object_size,
                                 const RouteGetResult& route);
+  // Queues the pull with no admission check; false if not queued.
+  bool QueueWholeObjectPull(const std::string& key, size_t object_size,
+                            const RouteGetResult& route);
   // The other half of the same decision: the arena slice already holds the
   // whole object (the caller's ranges tiled it in order), so locality costs one
   // local copy instead of a second trip to the peer.  Synchronous because the
@@ -576,8 +667,15 @@ class PoolClient {
   //   bytes == nullptr  -> pull the object from `route` first
   //                        (MaybePrefetchWholeObject)
   struct ReCacheJob {
+    struct BufferDeleter {
+      std::shared_ptr<PoolPlatform> platform;
+      HostBufferHandle buffer;
+      void operator()(char*) {
+        if (platform) platform->FreeHost(buffer);
+      }
+    };
     std::string key;
-    std::unique_ptr<char[]> bytes;
+    std::unique_ptr<char[], BufferDeleter> bytes{nullptr, BufferDeleter{}};
     size_t size = 0;
     std::optional<RouteGetResult> route;
   };
@@ -625,8 +723,12 @@ class PoolClient {
    public:
     // Non-owning: the buffer belongs to the caller (DistributedClient).  A shard
     // count of 0 or 1 keeps the original single-arena behaviour.
-    void Reset(void* base, size_t bytes, size_t shards);
+    void Reset(void* base, size_t bytes, size_t shards, int numa_node = -1);
     size_t ShardBytes() const { return shard_bytes_; }
+    char* Base() const { return base_; }
+    size_t Bytes() const { return bytes_; }
+    // The node the buffer was placed on; -1 when it was not placed by node.
+    int NumaNode() const { return numa_node_; }
 
     // Holds a shard for its lifetime and gives it back on destruction, so every
     // early exit out of an arena loop releases it.
@@ -696,20 +798,53 @@ class PoolClient {
     // the proxy-reference specialisation buys nothing at these sizes.
     std::vector<uint8_t> busy_;
     size_t shard_bytes_ = 0;
+    char* base_ = nullptr;
+    size_t bytes_ = 0;
+    int numa_node_ = -1;
   };
 
-  ScratchArena ranged_get_scratch_;
-  ScratchArena ranged_put_scratch_;
+  // PoolClientConfig::ranged_{get,put}_scratch, held by pointer because an
+  // arena owns a mutex.
+  std::vector<std::unique_ptr<ScratchArena>> ranged_get_scratch_;
+  std::vector<std::unique_ptr<ScratchArena>> ranged_put_scratch_;
+  // The arena a remote ranged call stages through, given its first caller
+  // buffer: the one on that buffer's NUMA node, else the first; null when the
+  // direction has none.  Its RDMA leg then uses that node's NICs, and the copy
+  // between the arena and a GPU stays on the GPU's socket.
+  ScratchArena* RangedArenaFor(bool get, const void* caller_buffer);
   std::condition_variable recache_cv_;
   std::thread recache_worker_;
   bool recache_stop_ = false;
   size_t recache_queue_max_ = 1024;
+
+  // Outcome counts for the local-tier admission path, reported by the periodic
+  // activity summary.  These replaced per-key DEBUG lines at each of these
+  // sites: every one of them is a best-effort give-up that leaves the read it
+  // was helping perfectly correct, so the only way to see one was to turn on a
+  // level that prints a line per key and changes the timing of the thing being
+  // measured.  Relaxed atomics — read once per summary window, sampled from
+  // another thread, never correctness state.
+  struct ReCacheCounters {
+    std::atomic<uint64_t> admitted{0};
+    std::atomic<uint64_t> rejected{0};
+    std::atomic<uint64_t> queue_full{0};
+    std::atomic<uint64_t> alloc_failed{0};
+    std::atomic<uint64_t> installed{0};
+    std::atomic<uint64_t> already_present{0};
+    std::atomic<uint64_t> install_failed{0};
+    std::atomic<uint64_t> prefetched{0};
+    std::atomic<uint64_t> fragmented{0};
+  };
+  ReCacheCounters recache_stats_;
   struct BatchPutItem {
     size_t index;
     const std::string* key;
     const void* src;
     size_t size;
     RoutePutResult route;
+    // The writer's NUMA node when `src` is a staging copy; -1 lets the slot
+    // request derive it from `src`.
+    int numa_hint = -1;
   };
   // One byte range of a stored object, named by the caller.
   struct ByteSpan {
@@ -773,7 +908,8 @@ class PoolClient {
                                         const std::vector<const void*>& srcs,
                                         const std::vector<size_t>& sizes,
                                         const std::vector<std::optional<RoutePutResult>>& routes,
-                                        std::vector<PutEntryOutcome>* results);
+                                        std::vector<PutEntryOutcome>* results,
+                                        const std::vector<int>* numa_hints = nullptr);
   // Execute a BatchPutPlan.  Zero-copy submits all peers (not waited), runs the
   // deferred local puts in that window, then waits all + commits; staging runs
   // per peer serially.  Writes per-key outcomes into *results.
@@ -805,6 +941,12 @@ class PoolClient {
   void ServeLocalGets(const std::vector<std::string>& keys, const std::vector<void*>& dsts,
                       const std::vector<size_t>& sizes, const std::vector<size_t>& indices,
                       std::vector<bool>* results, std::vector<size_t>* missed);
+  // One part of ServeLocalGets; returns the keys left for the next part.
+  std::vector<size_t> ServeLocalGetPart(const std::vector<std::string>& keys,
+                                        const std::vector<void*>& dsts,
+                                        const std::vector<size_t>& sizes,
+                                        const std::vector<size_t>& indices,
+                                        std::vector<bool>* results, std::vector<size_t>* missed);
 
   // Whole-batch wrapper for the local-first arm: drops what cannot be served at
   // all, serves the rest, and returns the keys the master still has to route.
@@ -813,10 +955,11 @@ class PoolClient {
                                          const std::vector<size_t>& sizes,
                                          std::vector<bool>* results);
 
-  // Counter sink that tolerates a node running without a master: metrics
-  // accumulate on the MasterClient and ride its flush tick, so with no master
-  // there is simply nowhere to put them.
-  void CountMetric(std::string name, std::string help, MasterClient::Labels labels, double delta);
+  // Counter sink that tolerates a node publishing nowhere: with a master the
+  // delta accumulates on the MasterClient and rides its flush tick, without one
+  // it goes straight into the local metrics server, and with neither it is
+  // dropped.
+  void CountMetric(std::string name, std::string help, MetricSink::Labels labels, double delta);
 
   // Placement when there is no master to ask: this node is the only candidate,
   // so every key is routed to it on the medium it serves.  The put paths then

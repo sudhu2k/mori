@@ -78,8 +78,9 @@ class InstrumentedBackend final : public MediumBackend {
   TierCapacity Capacity() const override { return inner_->Capacity(); }
   uint64_t OwnedKeyCount() const override { return inner_->OwnedKeyCount(); }
   bool Contains(const std::string& key) const override { return inner_->Contains(key); }
-  bool AcquireMigrationRead(const std::string& key, ResolvedEntry* resolved) override {
-    return inner_->AcquireMigrationRead(key, resolved);
+  bool AcquireMigrationRead(const std::string& key, ResolvedEntry* resolved,
+                            bool allow_file_ref) override {
+    return inner_->AcquireMigrationRead(key, resolved, allow_file_ref);
   }
   void ReleaseMigrationRead(const std::string& key) override { inner_->ReleaseMigrationRead(key); }
   std::vector<KvEvent> DrainPendingEvents() override { return inner_->DrainPendingEvents(); }
@@ -87,13 +88,24 @@ class InstrumentedBackend final : public MediumBackend {
   std::vector<KvEvent> SnapshotOwnedKeysForFullSync() override {
     return inner_->SnapshotOwnedKeysForFullSync();
   }
-  void ClearLocal() override { inner_->ClearLocal(); }
+  void ClearLocal() override {
+    inner_->ClearLocal();
+    NotifyChange();
+  }
+  void SetChangeHook(ChangeHook callback) override {
+    std::atomic_store(&change_hook_, std::make_shared<const ChangeHook>(std::move(callback)));
+  }
   void ClearFullSyncAcked() override { inner_->ClearFullSyncAcked(); }
   bool IsClearFullSyncPending() const override { return inner_->IsClearFullSyncPending(); }
   void SetEventPublishing(bool enabled) override { inner_->SetEventPublishing(enabled); }
-  void EnableLocalEviction(double high_watermark, double low_watermark) override {
-    inner_->EnableLocalEviction(high_watermark, low_watermark);
+  // Ordering only, not an operation: nothing is freed, so nothing is counted.
+  // The eviction that follows is an Evict() call and is measured there.
+  void TrackEvictionOrder() override { inner_->TrackEvictionOrder(); }
+  std::vector<EvictionOffer> EvictionCandidates(size_t max_count) override {
+    return inner_->EvictionCandidates(max_count);
   }
+  bool OwnsEvictionOrder() const override { return inner_->OwnsEvictionOrder(); }
+  void Touch(const std::vector<std::string>& keys) override { inner_->Touch(keys); }
 
   void SetAutoFlushHook(size_t threshold, std::function<void()> cb) override {
     inner_->SetAutoFlushHook(threshold, std::move(cb));
@@ -110,8 +122,10 @@ class InstrumentedBackend final : public MediumBackend {
   std::vector<AllocateResult> BatchAllocate(const std::vector<AllocateRequest>& reqs) override;
   std::vector<CommitResult> BatchCommit(const std::vector<CommitRequest>& reqs) override;
   std::vector<bool> BatchAbort(const std::vector<uint64_t>& slot_ids) override;
-  std::vector<ResolvedEntry> BatchResolve(const std::vector<std::string>& keys, bool include_descs,
-                                          bool allow_file_refs = false) override;
+  std::vector<ResolvedEntry> BatchResolve(
+      const std::vector<std::string>& keys, bool include_descs, bool allow_file_refs = false,
+      ResolveReader reader = ResolveReader::kRemote,
+      const std::vector<ObjectExtent>* extents = nullptr) override;
   std::vector<EvictResult> Evict(const std::vector<std::string>& keys) override;
 
   // ---- bootstrap / local endpoints: pass-through ----
@@ -125,6 +139,12 @@ class InstrumentedBackend final : public MediumBackend {
   }
 
  private:
+  void NotifyChange(const std::vector<std::string>& keys = {}) {
+    auto callback = std::atomic_load(&change_hook_);
+    if (callback && *callback) (*callback)(keys);
+  }
+  std::shared_ptr<const ChangeHook> change_hook_;
+
   // One op's accumulators.  Relaxed atomics: these are read once per metrics
   // tick from another thread and are never correctness state, so ordering
   // against the data plane buys nothing.

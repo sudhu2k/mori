@@ -7,6 +7,7 @@ set(CMAKE_CXX_FLAGS_O3DEBUG "-ggdb -O3")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+option(MORI_USE_LIBFABRIC "Build the OFI/libfabric backend (auto-skipped if libfabric is absent)" ON)
 
 if(NOT DEFINED CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
   message(STATUS "Build type not set - defaulting to Release")
@@ -56,16 +57,22 @@ endif()
 
 option(BUILD_OPS "Whether to build mori operation kernels" ON)
 option(BUILD_IO "Whether to build mori io library" ON)
+option(ENABLE_IO_FAULT_INJECTION
+       "Compile MORI-IO verbs fault injection (tests only; never in production)" OFF)
 option(BUILD_COLLECTIVE "Whether to build mori collective library" ON)
 option(BUILD_PYBINDS "Whether to build mori python bindings" ON)
 option(BUILD_XLA_FFI_OPS "Whether to build mori xla ffi python bindings" OFF)
 option(BUILD_UMBP "Whether to build UMBP (Unified Memory/Bandwidth Pool)" OFF)
 option(BUILD_METRICS "Whether to build the Prometheus metrics server module" ON)
+# OFF builds RAS out: every RAS call in the subsystems compiles to a no-op, and nothing links
+# libmori_ras. ON builds the runtime in, still off until MORI_RAS_ENABLE=1.
+option(BUILD_RAS "Whether to build the MORI RAS runtime" OFF)
 option(BUILD_TESTS "Whether to build mori CPP tests" ON)
 option(ENABLE_PROFILER "Enable kernel profiling" OFF)
 option(ENABLE_DEBUG_PRINTF "Enable debug printf in device kernels" OFF)
 option(ENABLE_STANDARD_MOE_ADAPT "Enable standard moe adapt" OFF)
 option(BUILD_OPS_DEVICE "AOT compile EP kernels to .hsaco(requires hipcc)" OFF)
+option(BUILD_OPS_KIWI "Build the KIWI EP dispatch/combine kernels (ROCm only)" OFF)
 option(MORI_MULTITHREAD_SUPPORT
        "Enable single-process multi-thread multi-GPU support in mori_shmem" OFF)
 
@@ -237,7 +244,19 @@ if(HAVE_WNO_DEPRECATED_LITERAL_OPERATOR)
 endif()
 
 add_library(mori_logging INTERFACE)
-target_include_directories(mori_logging INTERFACE include)
+# Prefer the real pciutils header for PCI topology enumeration. The bundled
+# 3rdparty/local_pci stub has a no-op pci_scan_bus, so if it shadows the system
+# <pci/pci.h> the PCI tree is silently empty (breaks GPU/NIC affinity). Only fall
+# back to the stub when pciutils-devel/libpci-dev is genuinely absent.
+find_path(MORI_SYSTEM_PCI_HEADER pci/pci.h)
+if(MORI_SYSTEM_PCI_HEADER)
+  message(STATUS "Using system pciutils header: ${MORI_SYSTEM_PCI_HEADER}/pci/pci.h")
+  target_include_directories(mori_logging INTERFACE include ${MORI_SYSTEM_PCI_HEADER})
+else()
+  message(WARNING "pciutils-devel/libpci-dev not found; using stub 3rdparty/local_pci "
+                  "— PCI topology detection is DISABLED (GPU/NIC affinity will not work)")
+  target_include_directories(mori_logging INTERFACE include 3rdparty/local_pci)
+endif()
 target_link_libraries(mori_logging INTERFACE spdlog::spdlog)
 
 if(HAVE_WNO_DEPRECATED_LITERAL_OPERATOR)
@@ -335,6 +354,17 @@ if(BUILD_OPS)
   add_subdirectory(src/ops)
 endif()
 
+if(BUILD_OPS_KIWI)
+  if(NOT USE_ROCM)
+    message(FATAL_ERROR "BUILD_OPS_KIWI=ON requires USE_ROCM=ON")
+  endif()
+  if(NOT BUILD_APPLICATION)
+    message(FATAL_ERROR "BUILD_OPS_KIWI=ON requires BUILD_APPLICATION=ON")
+  endif()
+  add_subdirectory(src/kiwi)
+  add_subdirectory(src/ops/dispatch_combine_kiwi)
+endif()
+
 if(BUILD_IO)
   add_subdirectory(src/io)
 endif()
@@ -353,6 +383,10 @@ endif()
 
 if(BUILD_METRICS)
   add_subdirectory(src/metrics)
+endif()
+
+if(BUILD_RAS)
+  add_subdirectory(src/ras)
 endif()
 
 if(BUILD_TESTS)
@@ -381,6 +415,9 @@ if(BUILD_IO)
 endif()
 if(BUILD_METRICS)
   install(TARGETS mori_metrics LIBRARY DESTINATION lib)
+endif()
+if(BUILD_RAS)
+  install(TARGETS mori_ras LIBRARY DESTINATION lib)
 endif()
 
 # Public headers

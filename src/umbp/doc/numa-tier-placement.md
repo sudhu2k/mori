@@ -35,6 +35,12 @@ claim strict placement on a system that cannot bind memory. A successful BIND
 still restricts physical pages to the selected node even when STRICT is zero;
 STRICT controls error handling, not whether that policy can spill on a fault.
 
+In a container, `mbind` needs `CAP_SYS_NICE`: under Docker's default seccomp
+profile it fails with `EPERM`. Run with `--cap-add SYS_NICE`, `--security-opt
+seccomp=unconfined` or `--privileged`. Without one of them a DRAM tier handles
+the failure as the table above says, and the standalone server's ranged
+scratch, which requires its binding, falls back to one arena per direction.
+
 With `UMBP_DRAM_USE_HUGEPAGES=1`, reserve huge pages per node, not only in
 total. The hugetlb reservation made at `mmap` time is global, but a fault under
 BIND takes pages only from the bound node, so a node whose own pool is short
@@ -50,8 +56,9 @@ the final buffer. The policy JSON's DRAM `numa_node` also accepts a list:
 ```
 
 Policy-created DRAM backends inherit the configured hugepage, prefault, strict
-binding and prefault thread options. Python exposes `dram.numa_nodes`,
-`dram.numa_strict`, and `dram.prefault_threads`. The deprecated `dram.numa_node`
+binding, prefault thread and memory-region size options. Python exposes
+`dram.numa_nodes`, `dram.numa_strict`, `dram.prefault_threads`, and
+`dram.max_mr_bytes`. The deprecated `dram.numa_node`
 property reads the first node (or `-1`); assigning it replaces the entire list.
 The standalone client's child server receives the same configuration.
 
@@ -68,21 +75,67 @@ that buffer. Otherwise, a global capacity check precedes allocation of the
 local remainder and then pages from other buffers. Insufficient global space
 leaves all bitmaps unchanged. HBM and SSD backends ignore the hint.
 
+A host buffer larger than `UMBP_DRAM_MAX_MR_BYTES` (default 512 GiB) is
+registered with the NIC as several memory regions of at most that size, in
+whole backing and allocator pages. AMD Pensando AINIC firmware before
+1.117.5-a-190 translates only the first 2^18 page entries of a memory region
+and silently aliases the rest, so the limit must not exceed 2^18 backing
+pages: 512 GiB with 2 MiB pages, 1 GiB with 4 KiB pages. On such a host the
+DRAM tier and the ranged scratch warn at startup about a region with more,
+counted from the pages that actually back it, since a hugepage request that
+fell back to 4 KiB pages has 512 times the entries; the warning names the
+firmware. `0` registers each buffer whole. Each region is its own buffer on
+the same node; a node preference takes the first of that node's regions that
+holds the request.
+
 Logical page spill and physical memory spill are distinct: the former uses
 another tier buffer when the local buffer is full; `MPOL_PREFERRED` also lets
 the kernel back a buffer with another node's physical pages when necessary.
 Startup logs distinguish target placement from sampled physical placement.
 Failure to query placement is logged rather than inferred as success.
 
-Multi-node tiers prefault buffers in parallel with a total budget of at most
-16 workers. Large buffers can subdivide that budget into page-aligned chunks;
-small chunks stay serial. Prefault workers use the target node's allowed CPUs
-and restore their previous affinity. `UMBP_DRAM_PREFAULT=0` disables prefault.
-GPU registration and the transfer path are unchanged.
+Every tier of at least 64 MiB prefaults in parallel with a total budget of at
+most 16 workers (`UMBP_DRAM_PREFAULT_THREADS=1` restores the serial path).
+Large buffers can subdivide that budget into page-aligned chunks; small chunks
+stay serial. A bound buffer's workers run on its node's allowed CPUs. An
+unbound buffer's workers alternate between nodes in whole rounds, so first
+touch splits it evenly across sockets instead of filling one node first.
+Workers restore their previous affinity. `UMBP_DRAM_PREFAULT=0` disables
+prefault. GPU registration and the transfer path are unchanged.
 
 This policy favors locality over the opportunity to put an entire object in a
 remote contiguous run. Its net benefit depends on fragmentation and workload.
 It does not migrate existing objects or replicate shared keys across sockets.
+
+## Remote writes
+
+A write routed to another node carries the same advisory hint in its slot
+request: the node of the writer's GPU, also when a ranged put stages the bytes
+through the ranged PUT arena, otherwise the node of a registered host source.
+The peer prefers its regions on that node. Without a hint (a CPU caller, or a
+writer that sends none), a tier with buffers on several nodes starts on the node
+with the most free pages instead of the first one, so the nodes fill evenly; a
+tier on one node keeps its order.
+
+Each side of an RDMA transfer picks its NICs from the node of its own memory, so
+the object then travels between NICs on the same node at both ends when the
+reader is the GPU that wrote it.
+
+## Ranged I/O
+
+A remote ranged GET or PUT stages through a host arena, and every GPU on a node
+shares the standalone server's. In one piece, the arena sits on whichever node
+first touch placed it, so its NUMA node picks the NICs of every rank's RDMA leg
+and half the GPUs copy across sockets. The standalone server therefore lays each
+arena out by NUMA node (`UMBP_DISTRIBUTED_RANGED_SCRATCH_NUMA`): the configured
+bytes are split evenly over the nodes that have GPUs, each part is bound to its
+node and registered on its own, and is cut into one shard per GPU on it unless
+`UMBP_DISTRIBUTED_RANGED_SCRATCH_SHARDS` sets the arena's total. A call stages
+through a shard on its caller buffer's node, or that node's whole part when it
+needs more than a shard. Memory is the same as one arena per direction. Each
+part is one NIC memory region, so on 4 KiB pages keep a part within 1 GiB, the
+AINIC limit above, or back the arenas with hugepages
+(`UMBP_DISTRIBUTED_RANGED_SCRATCH_USE_HUGEPAGES`).
 
 ## Measured effect
 
@@ -101,11 +154,11 @@ is about 1.3% of forward time with or without the split. A hugetlb tier
 reserved to capacity already fills node 0 and then node 1.
 
 The split does shorten startup. A standalone server with a 740 GB tier is ready
-in 64-81 s instead of 274 s with 4K pages, and in 10-13 s instead of 36 s with
-hugetlb. The single-buffer tier is prefaulted by one thread, which places the
-whole tier on that thread's node, and registering it for GPU access then takes
-several times longer. The split prefaults both halves at once, each on its own
-node.
+in 64-81 s with 4K pages and in 10-13 s with hugetlb. A single-buffer tier used
+to take 274 s and 36 s: one thread prefaulted it, which placed the whole tier on
+that thread's node, and registering a tier packed onto one node for GPU access
+takes several times longer. Its workers now alternate between nodes, and it is
+ready in 79-90 s and 12-14 s.
 
 Replicating shared keys on both nodes was measured at concurrency 128 and not
 adopted. Throughput fell by 10.9%: storing each shared key twice raised

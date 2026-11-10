@@ -69,11 +69,21 @@ std::vector<std::string> Toolchain::Flags() const {
       "-DHIP_ENABLE_WARP_SYNC_BUILTINS",
   };
   if (arch.rfind("gfx950", 0) == 0) f.push_back("-DHIP_ENABLE_GFX950_OCP_BUILTINS=1");
+  // cco.hpp hides the whole ccoSdma class behind this macro, so a TU that calls
+  // it does not merely lose an optimisation -- the name is undeclared and the
+  // compile fails. Unconditional rather than per-kernel: Flags() is hashed into
+  // the cache key (Compiler::CacheDirFor), so a kernel that does not use SDMA
+  // just gets a different key, not a stale module. The host library is built
+  // with BUILD_CCO_SDMA=ON by default; where it is OFF the queue count comes
+  // back 0 and the host-side gate reports that, which is a clearer failure than
+  // an undeclared identifier out of hipcc.
+  f.push_back("-DBUILD_CCO_SDMA=1");
   // Picks the GDA provider cco_scale_out.hpp compiles ccoGda<P> for; without it a
   // JIT TU on a bnxt/ionic host silently builds mlx5 WQEs. Mirrors
   // MoriDetectDevice.cmake, which likewise emits nothing for mlx5 -- the #else.
   if (nic == "bnxt") f.push_back("-DMORI_DEVICE_NIC_BNXT");
   if (nic == "ionic") f.push_back("-DMORI_DEVICE_NIC_IONIC");
+  if (nic == "ionic" && ionicCcqe) f.push_back("-DIONIC_CCQE");
   if (const char* extra = std::getenv("MORI_JIT_EXTRA_FLAGS")) {
     for (const std::string& tok : SplitWhitespace(extra)) f.push_back(tok);
   }
@@ -172,6 +182,10 @@ std::string DetectNic() {
   return v;
 }
 
+// Told, not probed, for the same reason as the NIC: the decision has to match the
+// host's IsCcqeSupported, and mori.jit.core.is_ccqe_enabled() is what mirrors it.
+bool DetectIonicCcqe() { return EnvOr("MORI_DEVICE_IONIC_CCQE", "0") == "1"; }
+
 std::string DetectHipcc(const std::string& rocmPath) {
   if (const char* v = std::getenv("MORI_JIT_HIPCC"); v && *v) return v;
   for (const std::string& cand : {rocmPath + "/bin/hipcc", std::string("/opt/rocm/bin/hipcc")}) {
@@ -222,6 +236,7 @@ const Toolchain& GetToolchain() {
     tc.rocmPath = EnvOr("ROCM_PATH", "/opt/rocm");
     tc.arch = DetectArch();
     tc.nic = DetectNic();
+    tc.ionicCcqe = DetectIonicCcqe();
     tc.hipcc = DetectHipcc(tc.rocmPath);
     tc.sourceRoot = DetectSourceRoot();
     tc.signature = CompilerSignature(tc.hipcc);
@@ -231,8 +246,8 @@ const Toolchain& GetToolchain() {
 
     err = tc.Valid() ? "" : tc.Diagnose();
     if (err.empty()) {
-      MORI_INFO(mori::modules::OPS, "[jit] arch={} nic={} hipcc={} root={} cache={}", tc.arch,
-                tc.nic, tc.hipcc, tc.sourceRoot, tc.cacheRoot);
+      MORI_INFO(mori::modules::OPS, "[jit] arch={} nic={} ccqe={} hipcc={} root={} cache={}",
+                tc.arch, tc.nic, tc.ionicCcqe, tc.hipcc, tc.sourceRoot, tc.cacheRoot);
     }
   });
 

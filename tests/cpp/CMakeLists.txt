@@ -30,6 +30,12 @@ target_include_directories(test_logging PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_logging PRIVATE mori_logging gtest_main)
 add_test(NAME logging_concurrency COMMAND test_logging)
 
+# Header-only reader for flat YAML lists (mori/utils/flat_yaml.hpp).
+add_executable(test_flat_yaml utils/test_flat_yaml.cpp)
+target_include_directories(test_flat_yaml PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_flat_yaml PRIVATE gtest_main)
+add_test(NAME flat_yaml COMMAND test_flat_yaml)
+
 add_executable(test_transport_tcp application/test_transport_tcp.cpp)
 
 target_include_directories(test_transport_tcp
@@ -81,6 +87,36 @@ if(BUILD_IO)
   target_include_directories(test_transfer_wait PUBLIC ${CMAKE_SOURCE_DIR})
   target_link_libraries(test_transfer_wait mori_application mori_io)
 
+  if(ENABLE_IO_FAULT_INJECTION)
+    add_executable(test_fault_injection io/test_fault_injection.cpp)
+    target_include_directories(test_fault_injection
+                               PUBLIC ${CMAKE_SOURCE_DIR}/include)
+    target_include_directories(test_fault_injection PUBLIC ${CMAKE_SOURCE_DIR})
+    target_compile_definitions(
+      test_fault_injection
+      PRIVATE
+        MORI_IO_FAULT_CATALOG_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/io/fault_catalog/ibverbs.yaml"
+        MORI_IO_FAULT_CATALOG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/io/fault_catalog"
+    )
+    target_link_libraries(test_fault_injection mori_application mori_io)
+
+    # CPU-only regression checks with provider stand-ins; no libibverbs link.
+    add_executable(test_fault_injector io/test_fault_injector.cpp
+                   ${CMAKE_SOURCE_DIR}/src/io/rdma/fault_injector.cpp)
+    target_include_directories(test_fault_injector PRIVATE ${CMAKE_SOURCE_DIR}
+                               ${CMAKE_SOURCE_DIR}/include
+                               ${CMAKE_SOURCE_DIR}/3rdparty/msgpack-c/include)
+    target_compile_definitions(test_fault_injector PRIVATE MORI_IO_FAULT_INJECTION
+                                                          MSGPACK_NO_BOOST)
+    target_link_libraries(test_fault_injector mori_logging hip::host)
+  endif()
+
+  add_executable(test_peer_failure io/test_peer_failure.cpp)
+
+  target_include_directories(test_peer_failure PUBLIC ${CMAKE_SOURCE_DIR}/include)
+  target_include_directories(test_peer_failure PUBLIC ${CMAKE_SOURCE_DIR})
+  target_link_libraries(test_peer_failure mori_application mori_io)
+
   add_executable(test_topology application/test_topology.cpp)
 
   target_include_directories(test_topology PUBLIC ${CMAKE_SOURCE_DIR}/include)
@@ -98,6 +134,19 @@ if(BUILD_IO)
   if(DEFINED GPU_TARGETS)
     set_target_properties(test_discrete_buffer PROPERTIES HIP_ARCHITECTURES
                                                           "${GPU_TARGETS}")
+  endif()
+
+  # OFI/Slingshot correctness test — needs MPI to launch 2 ranks.
+  if(WITH_MPI)
+    find_package(MPI REQUIRED)
+    add_executable(ofi_slingshot_test io/ofi_slingshot_test.cpp)
+    target_include_directories(ofi_slingshot_test
+                               PUBLIC ${CMAKE_SOURCE_DIR}/include)
+    target_include_directories(ofi_slingshot_test PUBLIC ${CMAKE_SOURCE_DIR})
+    target_include_directories(ofi_slingshot_test
+                               PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+    target_link_libraries(ofi_slingshot_test mori_application mori_io
+                          ${MPI_CXX_LIBRARIES})
   endif()
 endif()
 
@@ -122,6 +171,8 @@ endif()
 if(BUILD_METRICS)
   add_subdirectory(metrics)
 endif()
+
+add_subdirectory(ras)
 
 # JIT v2 — always built: mori_jit is host-only and needs no hipcc.
 add_subdirectory(jit)

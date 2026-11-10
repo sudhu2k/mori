@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,11 @@ struct EpRequest {
   int scaleBytes = 0;    // per-token scale row carried with the payload; 0 = off
   bool combineFp4 = false;
   bool combineFp4F32Scale = false;
+  bool combineFp8 = false;
   bool tokOffExt = false;
+  int callTokMax = 0;
+  bool ll128 = false;
+  bool ll128CombineOnly = false;
 };
 
 template <typename Self, typename Visit>
@@ -72,11 +77,15 @@ inline void VisitFields(Self& r, const EpRequest& d, Visit&& v) {
   MORI_FIELD(scaleBytes);
   MORI_FIELD(combineFp4);
   MORI_FIELD(combineFp4F32Scale);
+  MORI_FIELD(combineFp8);
   MORI_FIELD(tokOffExt);
+  MORI_FIELD(callTokMax);
+  MORI_FIELD(ll128);
+  MORI_FIELD(ll128CombineOnly);
 #undef MORI_FIELD
 }
 
-MORI_JIT_ASSERT_FIELD_COUNT(EpRequest, 14,
+MORI_JIT_ASSERT_FIELD_COUNT(EpRequest, 18,
                             "added an EpRequest field -- update VisitFields(EpRequest) too");
 
 std::string EpRequestSchema();
@@ -86,6 +95,11 @@ std::string EpRequestSchema();
 enum class EpKernelKind { Dispatch, Combine };
 
 EpCfg MakeEpCfg(const std::string& arch, const EpRequest& req, EpKernelKind kind);
+
+// Plan info: Describe(cfg) plus what a caller sizes for the plan -- arena regions
+// (region.<stem>), dispatch staging (stagingBytes), the push combine's landing.
+std::string EpDispatchInfo(const EpCfg& cfg);
+std::string EpCombineInfo(const EpCfg& cfg);
 
 // ---------------------------------------------------------------------------
 // The two Specs. Same Cfg, same Args, different body and different geometry.
@@ -98,6 +112,30 @@ class EpDispatchSpec : public mori::jit::v2::KernelSpec<EpDispatchSpec, EpCfg> {
   static std::string RenderSource(const Cfg& cfg);
   static mori::jit::v2::LaunchGeometry Geometry(const Cfg& cfg);
   static const std::vector<std::string>& SourceDeps();
+
+  // Shadows KernelSpec::LaunchRaw to fail on the host instead of faulting on the
+  // device. Only the gfx125x body reads stagingBase, and it is the only body with
+  // an LDS budget -- sharedBytes is that same EpArchIs1250() decision, taken once
+  // at Prepare and carried on the plan, so no second arch query is needed here.
+  static void LaunchRaw(const Plan& plan, const void* argBuf, size_t argSize, hipStream_t stream) {
+    if (plan.geom.sharedBytes > 0 && !static_cast<const Args*>(argBuf)->stagingBase) {
+      throw std::runtime_error(
+          "ep_dispatch on gfx125x: staging_base was not bound. Allocate the plan's "
+          "info['stagingBytes'] bytes (EpDispatchPlan.describe gives it before the plan "
+          "exists) and plan.bind(staging_base=buf) -- a null base faults in the kernel.");
+    }
+    // EpStaging*Offset are EpScaleAlign multiples OF THE BASE, so the base owns the
+    // alignment the .bss arrays used to declare themselves. A caller carving staging
+    // out of a pool at an arbitrary offset -- the reason this argument exists -- gets
+    // no fault from a misaligned one, just every staging TDM run off its row.
+    if (plan.geom.sharedBytes > 0 &&
+        reinterpret_cast<uintptr_t>(static_cast<const Args*>(argBuf)->stagingBase) % EpScaleAlign) {
+      throw std::runtime_error(
+          "ep_dispatch on gfx125x: staging_base must be " + std::to_string(EpScaleAlign) +
+          " B aligned -- it is the base every staging sub-array is placed against.");
+    }
+    mori::jit::v2::KernelSpec<EpDispatchSpec, EpCfg>::LaunchRaw(plan, argBuf, argSize, stream);
+  }
 };
 
 class EpCombineSpec : public mori::jit::v2::KernelSpec<EpCombineSpec, EpCfg> {

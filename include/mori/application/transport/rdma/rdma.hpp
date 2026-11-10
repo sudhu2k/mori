@@ -205,6 +205,8 @@ std::optional<uint8_t> ReadIoQpTimeoutEnv();
 std::optional<uint8_t> ReadIoQpRetryCntEnv();
 std::optional<uint8_t> ReadIoQpRnrRetryEnv();
 std::optional<uint8_t> ReadIoQpMinRnrTimerEnv();
+// RDMA READs (and atomics) a requester QP keeps in flight; unset keeps the device limit.
+std::optional<uint8_t> ReadIoQpMaxRdAtomicEnv();
 
 bool ReadIbEnableRelaxedOrderingEnv();
 int MaybeAddRelaxedOrderingFlag(int accessFlag);
@@ -212,8 +214,9 @@ int MaybeAddRelaxedOrderingFlag(int accessFlag);
 // Export a dmabuf fd for the GPU buffer at `ptr`, reporting the byte offset of
 // `ptr` within the exported dmabuf via `*offset`. Returns -1 (and leaves fd
 // closed) if dmabuf export is unsupported. Caller owns the returned fd and must
-// close() it after registration. Used for both payload MRs and, on providers
-// that support it, GPU control-ring umems (mlx5 CQ/WQ/DBR).
+// close() it once done with it (after registration; for Ionic CQ/SQ/RQ rings,
+// when the ring is freed). Used for both payload MRs and, on providers that
+// support it, GPU control-ring umems (mlx5 CQ/WQ/DBR) and Ionic rings.
 int TryExportDmabufFd(void* ptr, size_t size, uint64_t* offset);
 
 /* -------------------------------------------------------------------------- */
@@ -224,6 +227,7 @@ class RdmaDeviceContext {
   RdmaDeviceContext(RdmaDevice* rdma_device, ibv_pd* in_pd);
   virtual ~RdmaDeviceContext();
 
+  // ibv_reg_mr only; aborts on failure.
   virtual RdmaMemoryRegion RegisterRdmaMemoryRegion(void* ptr, size_t size,
                                                     int accessFlag = MR_DEFAULT_ACCESS_FLAG);
   virtual RdmaMemoryRegion RegisterRdmaMemoryRegionDmabuf(void* ptr, size_t size, int dmabuf_fd,
@@ -231,9 +235,11 @@ class RdmaDeviceContext {
   // dmabuf registration with iova=0 (CCO symmetric flat-VA path; BNXT GDA).
   virtual RdmaMemoryRegion RegisterRdmaMemoryRegionDmabufIova0(
       void* ptr, size_t size, int dmabuf_fd, int accessFlag = MR_DEFAULT_ACCESS_FLAG);
-  // ibv_reg_mr-first registration; falls back to dmabuf. Set MORI_ENABLE_DMABUF_REG to try
-  // dmabuf first instead (falling back to ibv_reg_mr). This is the vendor-agnostic payload
-  // MR path; independent of the mlx5-specific MORI_MLX5_DMABUF knob.
+  // Memory HIP reports as host registers with ibv_reg_mr alone. Other memory: ibv_reg_mr-first
+  // registration; falls back to dmabuf. Set MORI_ENABLE_DMABUF_REG=1 to try dmabuf first instead
+  // (falling back to ibv_reg_mr). This is the vendor-agnostic payload MR path; the same switch
+  // also enables dmabuf Ionic CQ/SQ/RQ rings, while mlx5 control rings use the separate
+  // MORI_MLX5_DMABUF knob.
   virtual RdmaMemoryRegion RegisterRdmaMemoryRegionAuto(void* ptr, size_t size,
                                                         int accessFlag = MR_DEFAULT_ACCESS_FLAG);
   virtual void DeregisterRdmaMemoryRegion(void* ptr);

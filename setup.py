@@ -42,7 +42,7 @@ try:
 except ImportError:
     _HAVE_CYTHON = False
 
-_supported_arch_list = ["gfx942", "gfx950", "gfx1250"]
+_supported_arch_list = ["gfx942", "gfx950", "gfx1250", "gfx1250-strict"]
 
 _REQUIRED_SYSTEM_DEPS: list = []
 
@@ -56,11 +56,6 @@ _MPI_SYSTEM_DEPS = [
 ]
 
 _REQUIRED_HEADERS = [
-    (
-        ["/usr/include/pci/pci.h", "/usr/include/x86_64-linux-gnu/pci/pci.h"],
-        ("libpci-dev", "pciutils-devel"),
-        "PCI library headers (needed for topology detection)",
-    ),
     (
         ["/usr/include/infiniband/verbs.h"],
         ("libibverbs-dev", "rdma-core-devel"),
@@ -175,6 +170,7 @@ def _detect_missing_umbp_deps() -> list:
             [
                 "/usr/include/grpcpp/grpcpp.h",
                 "/usr/include/x86_64-linux-gnu/grpcpp/grpcpp.h",
+                "/usr/local/include/grpcpp/grpcpp.h",
             ],
             "libgrpc++-dev",
         ),
@@ -182,6 +178,7 @@ def _detect_missing_umbp_deps() -> list:
             [
                 "/usr/include/google/protobuf/message.h",
                 "/usr/include/x86_64-linux-gnu/google/protobuf/message.h",
+                "/usr/local/include/google/protobuf/message.h",
             ],
             "libprotobuf-dev",
         ),
@@ -328,10 +325,10 @@ def _get_gpu_archs() -> str:
         if valid_arch_list:
             return ";".join(valid_arch_list)
 
-    print(
-        f"[mori] No GPU arch specified — building fat binary for {_supported_arch_list}"
-    )
-    return ";".join(_supported_arch_list)
+    # gfx1250-strict only by name or detection: older toolchains reject the target.
+    fat = [a for a in _supported_arch_list if not a.endswith("-strict")]
+    print(f"[mori] No GPU arch specified — building fat binary for {fat}")
+    return ";".join(fat)
 
 
 def _copy_jit_sources(root_dir: Path) -> None:
@@ -687,6 +684,7 @@ class CMakeBuild(build_ext):
         build_shmem_device_wrapper = os.environ.get("BUILD_SHMEM_DEVICE_WRAPPER", "ON")
         enable_profiler = os.environ.get("ENABLE_PROFILER", "OFF")
         enable_debug_printf = os.environ.get("ENABLE_DEBUG_PRINTF", "OFF")
+        enable_io_fault_injection = os.environ.get("ENABLE_IO_FAULT_INJECTION", "OFF")
 
         enable_standard_moe_adapt = os.environ.get("ENABLE_STANDARD_MOE_ADAPT", "OFF")
         multithread_support = os.environ.get("MORI_MULTITHREAD_SUPPORT", "OFF")
@@ -695,10 +693,12 @@ class CMakeBuild(build_ext):
         build_examples = os.environ.get("BUILD_EXAMPLES", "OFF")
         build_benchmark = os.environ.get("BUILD_BENCHMARK", "OFF")
         build_tests = os.environ.get("BUILD_TESTS", "OFF")
+        build_ras = "ON" if _env_flag("BUILD_RAS", "OFF") else "OFF"
         build_umbp = "ON" if build_umbp_enabled else "OFF"
         build_umbp_spdk = "ON" if build_umbp_spdk_enabled else "OFF"
         use_redis_backend = os.environ.get("USE_REDIS_BACKEND", "OFF")
         build_xla_ffi_ops = os.environ.get("BUILD_XLA_FFI_OPS", "OFF")
+        build_ops_kiwi_enabled = _env_flag("BUILD_OPS_KIWI", "OFF")
         with_mpi = (
             "ON"
             if (
@@ -739,16 +739,21 @@ class CMakeBuild(build_ext):
         cmake_args = [
             "cmake",
             "-DUSE_ROCM=ON",
+            # Otherwise src/pybind/CMakeLists.txt builds the modules for whichever
+            # python3 is first on PATH, not for the interpreter running this build.
+            f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DWARP_ACCUM_UNROLL={unroll_value}",
             f"-DBUILD_SHMEM_DEVICE_WRAPPER={build_shmem_device_wrapper}",
             f"-DENABLE_DEBUG_PRINTF={enable_debug_printf}",
+            f"-DENABLE_IO_FAULT_INJECTION={enable_io_fault_injection}",
             f"-DENABLE_STANDARD_MOE_ADAPT={enable_standard_moe_adapt}",
             f"-DGPU_TARGETS={gpu_archs}",
             f"-DENABLE_PROFILER={enable_profiler}",
             f"-DBUILD_EXAMPLES={build_examples}",
             f"-DBUILD_BENCHMARK={build_benchmark}",
             f"-DBUILD_TESTS={build_tests}",
+            f"-DBUILD_RAS={build_ras}",
             f"-DBUILD_UMBP={build_umbp}",
             f"-DUSE_REDIS_BACKEND={use_redis_backend}",
             f"-DUSE_SPDK={build_umbp_spdk}",
@@ -756,6 +761,7 @@ class CMakeBuild(build_ext):
             "-DBUILD_TORCH_BOOTSTRAP=OFF",
             f"-DBUILD_XLA_FFI_OPS={build_xla_ffi_ops}",
             f"-DBUILD_OPS_DEVICE={build_ops_device}",
+            f"-DBUILD_OPS_KIWI={'ON' if build_ops_kiwi_enabled else 'OFF'}",
             f"-DBUILD_CCO_SDMA={BUILD_CCO_SDMA}",
             f"-DMORI_MULTITHREAD_SUPPORT={multithread_support}",
             "-B",
@@ -837,11 +843,30 @@ class CMakeBuild(build_ext):
             files_to_copy.append(
                 (collective_so, root_dir / "python/mori/libmori_collective.so")
             )
+        # libmori_io.so needs it beside it unless BUILD_RAS=OFF built RAS out.
+        ras_so = build_dir / "src/ras/libmori_ras.so"
+        if build_ras == "ON":
+            files_to_copy.append((ras_so, root_dir / "python/mori/libmori_ras.so"))
         for src_path, dst_path in files_to_copy:
             shutil.copyfile(src_path, dst_path)
 
-        # UMBP bindings are compiled into libmori_pybinds.so when BUILD_UMBP=ON
-        # (no separate .so to copy)
+        # UMBP bindings are their own module (it links gRPC); mori.cpp loads it lazily.
+        # Keyed on the flag, not the file: CMake leaves a stale one in a reused build dir.
+        umbp_pybinds_src = build_dir / "src/pybind/libmori_umbp_pybinds.so"
+        umbp_pybinds_dst = root_dir / "python/mori/libmori_umbp_pybinds.so"
+        if build_umbp_enabled and umbp_pybinds_src.exists():
+            shutil.copyfile(umbp_pybinds_src, umbp_pybinds_dst)
+        elif umbp_pybinds_dst.exists():
+            umbp_pybinds_dst.unlink()
+
+        for kiwi_lib in ("libmori_ops_kiwi.so", "libmori_kiwi_ep_pybinds.so"):
+            kiwi_src = build_dir / "src/ops/dispatch_combine_kiwi" / kiwi_lib
+            kiwi_dst = root_dir / "python/mori" / kiwi_lib
+            if build_ops_kiwi_enabled and kiwi_src.exists():
+                shutil.copyfile(kiwi_src, kiwi_dst)
+            elif kiwi_dst.exists():
+                kiwi_dst.unlink()
+
         spdk_proxy_src = build_dir / "src/umbp/spdk_proxy"
         spdk_proxy_dst = root_dir / "python/mori/spdk_proxy"
         if build_umbp_spdk_enabled and spdk_proxy_src.exists():
@@ -1080,8 +1105,12 @@ mori_package_data = [
     "libmori_application.so",
     "libmori_metrics.so",
     "libmori_collective.so",  # optional: only present when BUILD_COLLECTIVE=ON
+    "libmori_ras.so",  # optional: absent when BUILD_RAS=OFF
     "libmori_jit.so",  # JIT v2 C ABI + plan registry
     "libmori_ops_v2.so",  # v2 EP kernels' host side; registers into libmori_jit
+    "libmori_umbp_pybinds.so",  # optional: only present when BUILD_UMBP=ON
+    "libmori_ops_kiwi.so",  # optional: only present when BUILD_OPS_KIWI=ON
+    "libmori_kiwi_ep_pybinds.so",  # optional: only present when BUILD_OPS_KIWI=ON
     "umbp_master",
     "umbp_standalone_server",
     "_jit-sources/include/**/*.hpp",
@@ -1095,6 +1124,7 @@ mori_package_data = [
     "_jit-sources/3rdparty/**/*.hpp",
     "_jit-sources/tools/**/*.py",
     "ops/tuning_configs/*.json",
+    "io/sim_catalog.yaml",  # MORI_IO_SIM_CATALOG timing for measured hardware
     "tools/*.sh",
     "tools/mori.conf",
     "examples/cco/*",  # CCO C++ example binaries (only present when BUILD_EXAMPLES=ON)

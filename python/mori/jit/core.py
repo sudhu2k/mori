@@ -171,18 +171,28 @@ def _verify_bitcode(cfg: BuildConfig, bc_path: Path) -> None:
 
 
 def _lib_has_ionic_ccqe() -> bool:
-    """Check whether the ionic driver supports CCQE by probing the runtime library symbol."""
+    """Check whether the ionic driver supports CCQE by probing the runtime library symbol.
+
+    Must resolve the same library the host runtime dlopens (IonicDvApi::Load opens
+    "libionic.so"): the host creates a collapsed CQ whenever it finds
+    ionic_dv_create_cq_ex there, and a kernel compiled without -DIONIC_CCQE polls that
+    CQ as a ring and hangs. find_library returns the soname (libionic.so.1), which a
+    container that bind-mounts only libionic.so does not have.
+    """
     import ctypes
     import ctypes.util
 
-    lib_name = ctypes.util.find_library("ionic")
-    if lib_name is None:
-        return False
-    try:
-        lib = ctypes.CDLL(lib_name)
+    candidates = ["libionic.so"]
+    found = ctypes.util.find_library("ionic")
+    if found is not None and found not in candidates:
+        candidates.append(found)
+    for lib_name in candidates:
+        try:
+            lib = ctypes.CDLL(lib_name)
+        except OSError:
+            continue
         return hasattr(lib, "ionic_dv_create_cq_ex")
-    except OSError:
-        return False
+    return False
 
 
 _CCQE_MIN_FW_VERSION = (1, 117, 5, 58)
@@ -320,6 +330,13 @@ def _ocp_fp_defines(arch: str) -> list[str]:
     the fp4_blockwise combine's E2M1 quant/dequant helpers. Without this the helpers fall back to
     slow software bit-manipulation. Only relevant on gfx950; a no-op elsewhere."""
     return ["-DHIP_ENABLE_GFX950_OCP_BUILTINS=1"] if "gfx950" in str(arch) else []
+
+
+def _arch_family_defines(arch: str) -> list[str]:
+    """The host's gfx125x decision (see _FASTPATH_ARCH_PREFIX), so device code can check it."""
+    return (
+        ["-DMORI_HOST_GFX125X=1"] if str(arch).startswith(_FASTPATH_ARCH_PREFIX) else []
+    )
 
 
 def _debuginfo_flags() -> list[str]:
@@ -469,6 +486,7 @@ def _hipcc_genco(
         *_ccqe_defines(),
         *_profiler_defines(),
         *_ocp_fp_defines(cfg.arch),
+        *_arch_family_defines(cfg.arch),
         *_tunable_defines(),
     ]
 

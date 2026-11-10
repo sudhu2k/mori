@@ -34,10 +34,17 @@ namespace io {
 // Forward-declared here to avoid pulling internal backend headers into pybind.
 void* FabricMalloc(size_t size, int device);
 void FabricFree(void* ptr);
+namespace sim {
+// Defined in src/io/sim/backend_impl.cpp.
+bool IsEnabled();
+std::map<std::string, double> ProfileValues(BackendType type);
+}  // namespace sim
 }  // namespace io
 
 void RegisterMoriIo(pybind11::module_& m) {
   m.def("set_log_level", &mori::io::SetLogLevel);
+  m.def("io_sim_enabled", &mori::io::sim::IsEnabled);
+  m.def("io_sim_profile", &mori::io::sim::ProfileValues, py::arg("backend_type"));
 
   py::enum_<mori::io::BackendType>(m, "BackendType")
       .value("Unknown", mori::io::BackendType::Unknown)
@@ -45,6 +52,7 @@ void RegisterMoriIo(pybind11::module_& m) {
       .value("RDMA", mori::io::BackendType::RDMA)
       .value("TCP", mori::io::BackendType::TCP)
       .value("FABRIC", mori::io::BackendType::FABRIC)
+      .value("OFI", mori::io::BackendType::OFI)
       .export_values();
 
   py::enum_<mori::io::MemoryLocationType>(m, "MemoryLocationType")
@@ -67,6 +75,24 @@ void RegisterMoriIo(pybind11::module_& m) {
   py::enum_<mori::io::PollCqMode>(m, "PollCqMode")
       .value("POLLING", mori::io::PollCqMode::POLLING)
       .value("EVENT", mori::io::PollCqMode::EVENT);
+
+  py::enum_<mori::io::PeerFailureReason>(m, "PeerFailureReason")
+      .value("UNKNOWN", mori::io::PeerFailureReason::UNKNOWN)
+      .value("PEER_UNREACHABLE", mori::io::PeerFailureReason::PEER_UNREACHABLE)
+      .value("LOCAL_QP_ERROR", mori::io::PeerFailureReason::LOCAL_QP_ERROR)
+      .value("LOCAL_PORT_DOWN", mori::io::PeerFailureReason::LOCAL_PORT_DOWN)
+      .value("LOCAL_DEVICE_FATAL", mori::io::PeerFailureReason::LOCAL_DEVICE_FATAL)
+      .value("LOCAL_CQ_ERROR", mori::io::PeerFailureReason::LOCAL_CQ_ERROR)
+      .export_values();
+
+  py::class_<mori::io::PeerFailureEvent>(m, "PeerFailureEvent")
+      .def(py::init<>())
+      .def_readonly("remote_engine_key", &mori::io::PeerFailureEvent::remoteEngineKey)
+      .def_readonly("reason", &mori::io::PeerFailureEvent::reason)
+      .def_readonly("qp_num", &mori::io::PeerFailureEvent::qpNum)
+      .def_readonly("port_num", &mori::io::PeerFailureEvent::portNum)
+      .def_readonly("device_name", &mori::io::PeerFailureEvent::deviceName)
+      .def_readonly("detail", &mori::io::PeerFailureEvent::detail);
 
   py::class_<mori::io::BackendConfig>(m, "BackendConfig");
 
@@ -98,10 +124,20 @@ void RegisterMoriIo(pybind11::module_& m) {
       .def_readwrite("num_streams", &mori::io::XgmiBackendConfig::numStreams)
       .def_readwrite("num_events", &mori::io::XgmiBackendConfig::numEvents);
 
+  py::class_<mori::io::TcpBackendConfig, mori::io::BackendConfig>(m, "TcpBackendConfig")
+      .def(py::init<>());
+
   py::class_<mori::io::FabricBackendConfig, mori::io::BackendConfig>(m, "FabricBackendConfig")
       .def(py::init<int, int>(), py::arg("num_streams") = 64, py::arg("num_events") = 64)
       .def_readwrite("num_streams", &mori::io::FabricBackendConfig::numStreams)
       .def_readwrite("num_events", &mori::io::FabricBackendConfig::numEvents);
+
+  py::class_<mori::io::OfiBackendConfig, mori::io::BackendConfig>(m, "OfiBackendConfig")
+      .def(py::init<>())
+      .def(py::init<const std::string&, int>(), py::arg("provider"), py::arg("cq_batch") = 64)
+      .def_readwrite("provider_hint", &mori::io::OfiBackendConfig::providerHint)
+      .def_readwrite("cq_read_batch", &mori::io::OfiBackendConfig::cqReadBatch)
+      .def_readwrite("mr_access_flags", &mori::io::OfiBackendConfig::mrAccessFlags);
 
   // Allocate/free GPU memory that is exportable over a UALink super-node fabric.
   // Returns the device pointer as an integer, suitable for register_memory().
@@ -142,6 +178,15 @@ void RegisterMoriIo(pybind11::module_& m) {
       .def_readonly("host", &mori::io::EngineDesc::host)
       .def_readonly("port", &mori::io::EngineDesc::port)
       .def_readonly("pid", &mori::io::EngineDesc::pid)
+      .def_property_readonly("backend_descs",
+                             [](const mori::io::EngineDesc& d) {
+                               py::dict out;
+                               for (const auto& [type, blob] : d.backendDescs) {
+                                 out[py::int_(static_cast<uint32_t>(type))] = py::bytes(
+                                     reinterpret_cast<const char*>(blob.data()), blob.size());
+                               }
+                               return out;
+                             })
       .def(pybind11::self == pybind11::self)
       .def("pack",
            [](const mori::io::EngineDesc& d) {
@@ -216,6 +261,14 @@ void RegisterMoriIo(pybind11::module_& m) {
       .def("Write", &mori::io::IOEngine::Write, py::call_guard<py::gil_scoped_release>())
       .def("BatchWrite", &mori::io::IOEngine::BatchWrite, py::call_guard<py::gil_scoped_release>())
       .def("CreateSession", &mori::io::IOEngine::CreateSession)
+      .def(
+          "PopPeerFailure",
+          [](mori::io::IOEngine& self) -> std::optional<mori::io::PeerFailureEvent> {
+            mori::io::PeerFailureEvent event;
+            if (!self.PopPeerFailure(&event)) return std::nullopt;
+            return event;
+          },
+          py::call_guard<py::gil_scoped_release>())
       .def("PopInboundTransferStatus", &mori::io::IOEngine::PopInboundTransferStatus,
            py::call_guard<py::gil_scoped_release>())
       .def("WaitAll", &mori::io::IOEngine::WaitAll, py::arg("statuses"), py::arg("timeout_ms") = -1,

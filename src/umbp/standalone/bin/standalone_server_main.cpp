@@ -41,6 +41,9 @@
 #include <vector>
 
 #include "mori/utils/mori_log.hpp"
+#include "umbp/common/env_time.h"
+#include "umbp/common/fd_limit.h"
+#include "umbp/distributed/transfer/hbm_copy_engine.h"
 #include "umbp/standalone/ipc.h"
 #include "umbp/standalone/standalone_server.h"
 
@@ -132,8 +135,13 @@ bool ApplyDistributedBackendConfigFromEnv(mori::umbp::UMBPConfig* config,
   // medium counts: a pure-SSD server is configured by naming SSD and nothing
   // else, which is the whole command for a node that serves storage locally.
   static const std::vector<const char*> kDistributedSelectorEnv = {
-      "UMBP_MASTER_ADDRESS", "UMBP_NODE_ADDRESS",       "UMBP_NODE_ID",
-      "UMBP_IO_ENGINE_HOST", "UMBP_DISTRIBUTED_MEDIUM",
+      "UMBP_MASTER_ADDRESS",
+      "UMBP_NODE_ADDRESS",
+      "UMBP_NODE_ID",
+      "UMBP_IO_ENGINE_HOST",
+      "UMBP_DISTRIBUTED_MEDIUM",
+      "UMBP_BACKEND_POLICY",
+      "UMBP_DISTRIBUTED_DRAM_PAGE_SIZE",
   };
 
   *distributed_requested = AnyEnv(kDistributedSelectorEnv);
@@ -192,7 +200,17 @@ bool ApplyDistributedBackendConfigFromEnv(mori::umbp::UMBPConfig* config,
     return false;
   if (!ParseSizeEnv("UMBP_DISTRIBUTED_RANGED_SCRATCH_BYTES", &dist.ranged_scratch_size, error))
     return false;
-  if (!ParseSizeEnv("UMBP_DISTRIBUTED_SSD_STAGING_BUFFER_SIZE", &dist.ssd_staging_buffer_size,
+  if (!ParseBoolEnv("UMBP_DISTRIBUTED_RANGED_SCRATCH_USE_HUGEPAGES",
+                    &dist.ranged_scratch_use_hugepages, error)) {
+    return false;
+  }
+  if (!ParseSizeEnv("UMBP_DISTRIBUTED_RANGED_SCRATCH_HUGEPAGE_SIZE",
+                    &dist.ranged_scratch_hugepage_size, error)) {
+    return false;
+  }
+  // Every GPU on the node shares this server's arenas.
+  dist.ranged_scratch_numa_layout = true;
+  if (!ParseBoolEnv("UMBP_DISTRIBUTED_RANGED_SCRATCH_NUMA", &dist.ranged_scratch_numa_layout,
                     error)) {
     return false;
   }
@@ -200,8 +218,8 @@ bool ApplyDistributedBackendConfigFromEnv(mori::umbp::UMBPConfig* config,
                    error)) {
     return false;
   }
-  if (dist.ssd_staging_buffer_slots <= 0) {
-    *error = "UMBP_DISTRIBUTED_SSD_STAGING_BUFFER_SLOTS must be > 0";
+  if (dist.ssd_staging_buffer_slots < 0) {
+    *error = "UMBP_DISTRIBUTED_SSD_STAGING_BUFFER_SLOTS must be >= 0 (0 = the preset)";
     return false;
   }
   if (!ParseBoolEnv("UMBP_DISTRIBUTED_SSD_STAGING_USE_HUGEPAGES", &dist.ssd_staging_use_hugepages,
@@ -238,10 +256,13 @@ bool ApplyDistributedBackendConfigFromEnv(mori::umbp::UMBPConfig* config,
   if (!ParseBoolEnv("UMBP_DISTRIBUTED_LOCAL_FIRST", &dist.local_first, error)) {
     return false;
   }
+  if (!ParseSizeEnv("UMBP_DISTRIBUTED_PREFETCH_BUDGET_BYTES", &dist.prefetch_budget_bytes, error))
+    return false;
   size_t dram_page_size = static_cast<size_t>(dist.dram_page_size);
   if (!ParseSizeEnv("UMBP_DISTRIBUTED_DRAM_PAGE_SIZE", &dram_page_size, error)) return false;
   dist.dram_page_size = static_cast<uint64_t>(dram_page_size);
-  if (dist.dram_page_size == 0) {
+  // Local pools can use MORI's default. Cluster members must agree on a page size.
+  if (has_master && dist.dram_page_size == 0) {
     *error = "UMBP_DISTRIBUTED_DRAM_PAGE_SIZE must be explicitly set to > 0";
     return false;
   }
@@ -256,6 +277,19 @@ bool ApplyDistributedBackendConfigFromEnv(mori::umbp::UMBPConfig* config,
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Backend and GPU initialization create threads. They must inherit the mask
+  // so SIGTERM reaches the waiter and shutdown can withdraw Indexer residency.
+  sigset_t signal_set;
+  sigemptyset(&signal_set);
+  sigaddset(&signal_set, SIGINT);
+  sigaddset(&signal_set, SIGTERM);
+  const int block_rc = pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
+  if (block_rc != 0) {
+    MORI_UMBP_ERROR("[StandaloneServer] failed to block signals: {}", std::strerror(block_rc));
+    return 1;
+  }
+
+  mori::umbp::RaiseOpenFileLimit();
   mori::umbp::UMBPConfig config = mori::umbp::UMBPConfig::FromEnvironment();
   config.role = mori::umbp::UMBPRole::Standalone;
   config.follower_mode = false;
@@ -282,22 +316,20 @@ int main(int argc, char** argv) {
     address = mori::umbp::standalone::DefaultStandaloneAddress();
   }
 
+  // Before the server exists: registering its host pool, which carries on in
+  // the background, would slow each queue creation here to about a second.
+  // 8 covers the peak number of concurrent gathers per GPU under TP8 serving;
+  // 0 turns the prewarm off.
+  if (!config.sim.enabled) {
+    mori::umbp::HbmCopyEngine::Prewarm(
+        mori::umbp::GetEnvUint32("UMBP_HBM_GATHER_PREWARM_STREAMS", 8));
+  }
+
   std::unique_ptr<mori::umbp::standalone::StandaloneServer> server;
   try {
     server = std::make_unique<mori::umbp::standalone::StandaloneServer>(config, address);
   } catch (const std::exception& exc) {
     MORI_UMBP_ERROR("[StandaloneServer] backend initialization failed: {}", exc.what());
-    return 1;
-  }
-
-  sigset_t signal_set;
-  sigemptyset(&signal_set);
-  sigaddset(&signal_set, SIGINT);
-  sigaddset(&signal_set, SIGTERM);
-
-  const int block_rc = pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
-  if (block_rc != 0) {
-    MORI_UMBP_ERROR("[StandaloneServer] failed to block signals: {}", std::strerror(block_rc));
     return 1;
   }
 

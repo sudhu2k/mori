@@ -31,7 +31,8 @@ pip install .  (~18s, CXX compiler only)
   ├── CMake + clang++ → host .so (no device code in ops)
   │   ├── mori_ops        → CXX  (args construction, handle lifecycle)
   │   ├── mori_shmem      → CXX  (host-only: init, runtime, memory)
-  │   └── mori_pybinds    → CXX  (pybind11 bindings)
+  │   ├── mori_pybinds    → CXX  (pybind11 bindings)
+  │   └── mori_umbp_pybinds → CXX  (UMBP bindings; BUILD_UMBP, links gRPC)
   └── Copy JIT sources → mori/_jit_sources/ (packaged in wheel)
 
 First run (JIT, one-time, needs hipcc at runtime)
@@ -67,6 +68,7 @@ site-packages/mori/
 ├── ops/dispatch_combine.py            # Python-side kernel launch orchestration
 ├── ir/bitcode.py                      # Triton bitcode locator
 ├── libmori_pybinds.so                 # Host pybind11 module
+├── libmori_umbp_pybinds.so            # UMBP pybind11 module (BUILD_UMBP; links gRPC, loaded lazily)
 ├── libmori_application.so             # Bootstrap + RDMA transport
 └── libmori_io.so                      # I/O module
 ```
@@ -254,7 +256,7 @@ Bitcode search order in `find_bitcode()`:
 | `MORI_PRECOMPILE=1` | off | Pre-compile all kernels on `import mori` |
 | `MORI_DISABLE_JIT=1` | off | Disable bitcode JIT (error if no pre-built .bc) |
 | `MORI_JIT_CACHE_DIR` | `~/.mori/jit/` | Custom cache directory |
-| `MORI_GPU_ARCHS` | auto-detect | Override GPU architecture (e.g. `gfx942`) |
+| `MORI_GPU_ARCHS` | auto-detect | One arch overrides detection (e.g. `gfx942`, `gfx1250-strict`); a list (a build's targets) is used only when no GPU is detected |
 | `MORI_SHMEM_BC` | auto | Explicit path to shmem bitcode |
 | `USE_BNXT=ON` | auto-detect | Override NIC type to Broadcom BNXT |
 | `USE_IONIC=ON` | auto-detect | Override NIC type to AMD/Pensando IONIC |

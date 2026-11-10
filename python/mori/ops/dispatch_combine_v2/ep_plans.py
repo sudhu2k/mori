@@ -35,6 +35,9 @@ which is what lets the binding test skip cleanly when the .so is absent.
 from __future__ import annotations
 
 import os
+import sys
+import warnings
+import weakref
 
 from mori.jit.v2 import plan_api
 
@@ -42,6 +45,7 @@ from mori.jit.v2 import plan_api
 _LIB_NAME = "libmori_ops_v2.so"
 DTYPES = plan_api.DTYPES
 make_plan = plan_api.make_plan
+arena_regions = plan_api.arena_regions
 registered_plans = plan_api.registered_plans
 precompile = plan_api.precompile
 library_path = plan_api.library_path
@@ -54,152 +58,154 @@ def _extra_dirs() -> list[str]:
 
 plan_api.load_library(_LIB_NAME, extra_dirs=_extra_dirs())
 
-_EpDispatchPlanBase = make_plan("ep_dispatch")
-EpCombinePlan = make_plan("ep_combine")
+_EpDispatchJitPlan = make_plan("ep_dispatch")
+
+# Staging for unbound dispatch plans, per device and layout; held by its plans.
+_FALLBACK_STAGING = weakref.WeakValueDictionary()
+
+# A warning about a caller's plan points at the first frame outside these.
+_BINDING_DIRS = tuple(
+    os.path.join(os.path.dirname(f), "") for f in (plan_api.__file__, __file__)
+)
 
 
-def self_first_state_bytes(world_size: int) -> int:
-    """Size of the state a selfFirst dispatch keeps in its own window.
-
-    The host-side copy of EpSelfFirstBytes in ep_cfg.hpp: one 64 B inbox slot per
-    rank rounded up to a 128 B line, then one line for this rank's counter and call
-    number and one for its publish ticket.
-    """
-    inbox = 64 * int(world_size)
-    return (inbox + 127) // 128 * 128 + 256
-
-
-class SelfFirstState:
-    """The selfFirst dispatch's symmetric state: one window per arena, owned here.
-
-    Allocated on the communicator that registered the arena's window, so whoever
-    builds the arena -- this package's op or a caller driving EpDispatchPlan
-    directly -- does not lay it out. Every dispatch plan on one arena shares it:
-    ranks may pick different geometries for the same call, and they must still
-    meet in one inbox and one call number. Zero when created; reset() of the op
-    zeroes it again. Freed when the last plan holding it closes.
-    """
-
-    _by_window: dict = {}
-
-    def __init__(self, comm, nbytes: int, key: int):
-        self._nbytes = nbytes
-        self._key = key
-        self._refs = 0
-        self._mem = comm.alloc_mem(nbytes)
-        self._win = None
-        try:
-            self._win = comm.register_window(self._mem.ptr, nbytes)
-            self.base, self.stride = self._flat_layout()
-            self.zero()
-        except BaseException:
-            if self._win is not None:
-                self._win.close()
-            self._mem.close()
-            raise
-
-    @classmethod
-    def acquire(cls, arena, world_size: int) -> "SelfFirstState":
-        key = int(arena.handle)
-        st = cls._by_window.get(key)
-        if st is None:
-            from mori.cco import communicator_of_window
-
-            comm = communicator_of_window(key)
-            if comm is None:
-                raise RuntimeError(
-                    "selfFirst dispatch: the arena's window was not registered through "
-                    "mori.cco, so there is no communicator to allocate the selfFirst "
-                    "state on"
-                )
-            st = cls(comm, self_first_state_bytes(world_size), key)
-            cls._by_window[key] = st
-        st._refs += 1
-        return st
-
-    @classmethod
-    def of(cls, arena) -> "SelfFirstState | None":
-        """The live state of `arena`, without taking a reference."""
-        return cls._by_window.get(int(arena.handle))
-
-    def _flat_layout(self) -> tuple[int, int]:
-        """(base, stride) such that PE p's copy is at base + p * stride.
-
-        Read once from the window's device descriptor (ccoWindowDevice in cco.hpp:
-        u64 winBase, u32 stride4G, i32 lsaRank), so the kernel addresses the state
-        without loading it. Checked against the local address, which cco reports
-        independently: a descriptor laid out differently fails here, not on the GPU.
-        """
-        import struct
-
-        import torch
-
-        from mori.tensor_utils import from_gpu_ptr
-
-        raw = bytes(from_gpu_ptr(self._win.handle, (16,), torch.uint8).cpu().tolist())
-        win_base, stride4g, lsa_rank = struct.unpack_from("<QIi", raw)
-        stride = stride4g << 32
-        if stride == 0 or win_base + lsa_rank * stride != self._win.local_ptr:
-            raise RuntimeError(
-                f"selfFirst state: window descriptor (winBase={win_base:#x}, "
-                f"stride4G={stride4g}, lsaRank={lsa_rank}) does not locate the local "
-                f"copy at {self._win.local_ptr:#x}"
-            )
-        return win_base, stride
-
-    def zero(self) -> None:
-        import torch
-
-        from mori.tensor_utils import from_gpu_ptr
-
-        if self._win is None:
-            raise RuntimeError("SelfFirstState.zero() after its last plan closed")
-        from_gpu_ptr(self._win.local_ptr, (self._nbytes,), torch.int8).zero_()
-        torch.cuda.synchronize()
-
-    def release(self) -> None:
-        self._refs -= 1
-        if self._refs > 0:
-            return
-        type(self)._by_window.pop(self._key, None)
-        win, mem, self._win, self._mem = self._win, self._mem, None, None
-        win.close()
-        mem.close()
-
-
-class EpDispatchPlan(_EpDispatchPlanBase):
-    # The generated signature stays the documentation; this only adds the binding.
-    __doc__ = (_EpDispatchPlanBase.__doc__ or "") + (
-        "\n\nThe gfx125x dispatch runs selfFirst unless ``tok_off_ext`` says the slot"
-        "\nallocator word lives outside the cco window. With it and an arena, the plan"
-        "\nbinds the arena's SelfFirstState, allocating it on first use; an arena whose"
-        "\nwindow mori.cco cannot trace to a communicator makes construction raise."
-    )
+class EpDispatchPlan(_EpDispatchJitPlan):
+    # gfx125x: staging_base defaults to a buffer shared per layout until bound (#703).
+    __doc__ = _EpDispatchJitPlan.__doc__
 
     def __init__(self, **kwargs):
-        arena = kwargs.get("arena")
-        self._self_first_state = None
+        self._staging = None
         super().__init__(**kwargs)
-        if arena is None:
-            return
+        self._fallback_staging = None
         info = self.info
-        if not info.get("selfFirst"):
-            return
-        try:
-            self._self_first_state = SelfFirstState.acquire(arena, info["worldSize"])
-        except BaseException:
-            super().close()
-            raise
-        state = self._self_first_state
-        self.bind(sf_base=state.base, sf_stride=state.stride)
+        # Only the gfx125x body stages; EpDispatchSpec::LaunchRaw tests the same.
+        if info["sharedBytes"]:
+            self.bind(staging_base=_FallbackStaging(self, info))
+
+    def bind(self, **args) -> None:
+        # A staging tensor is checked against info["stagingBytes"], bound by
+        # address, and held once the bind succeeds. An int address is taken on
+        # trust, and any other object with data_ptr() -- the fallback below among
+        # them -- is read at each launch, as before.
+        staging = None
+        for key in ("staging_base", "stagingBase"):
+            buf = args.get(key)
+            if hasattr(buf, "untyped_storage"):
+                args[key] = self._checked_staging(buf)
+                staging = buf
+        super().bind(**args)
+        if staging is not None:
+            self._staging = staging
+
+    def _checked_staging(self, buf) -> int:
+        import torch
+
+        need = self.info["stagingBytes"]
+        if buf.device.type != "cuda" or buf.device.index != torch.cuda.current_device():
+            raise ValueError(
+                f"ep_dispatch: staging_base is on {buf.device}, the plan launches on "
+                f"cuda:{torch.cuda.current_device()}"
+            )
+        # The tensor's own extent: a short slice of a larger buffer is still short.
+        if not buf.is_contiguous():
+            raise ValueError("ep_dispatch: staging_base must be contiguous")
+        have = buf.numel() * buf.element_size()
+        if have < need:
+            raise ValueError(
+                f"ep_dispatch: staging_base has {have} bytes, the plan needs {need} "
+                "(info['stagingBytes'])"
+            )
+        if buf.data_ptr() % 128:
+            raise ValueError("ep_dispatch: staging_base must be 128 B aligned")
+        return buf.data_ptr()
 
     def close(self) -> None:
-        state, self._self_first_state = getattr(self, "_self_first_state", None), None
-        try:
-            super().close()
-        finally:
-            if state is not None:
-                state.release()
+        super().close()
+        self._fallback_staging = None
+        self._staging = None
+
+
+class _FallbackStaging:
+    """The staging_base an EpDispatchPlan starts with; resolved at its first launch."""
+
+    __slots__ = ("_plan", "_info")
+
+    def __init__(self, plan, info):
+        self._plan = weakref.ref(plan)
+        self._info = info
+
+    def data_ptr(self) -> int:
+        buf = _fallback_staging(self._info)
+        plan = self._plan()
+        if plan is not None:
+            plan._fallback_staging = buf
+            # An int from here on: the launch struct caches it like a caller's.
+            plan.bind(staging_base=buf.data_ptr())
+        return buf.data_ptr()
+
+    def group_key(self):
+        # What a launch group compares, without allocating: the buffer's address
+        # once its layout has one, the layout until then.
+        key = _staging_key(self._info)
+        buf = _FALLBACK_STAGING.get(key)
+        return buf.data_ptr() if buf is not None else ("fallback", *key)
+
+
+def _staging_key(info: dict) -> tuple:
+    import torch
+
+    # The cap EpMaxRecv resolves, so maxRecv=0 and its resolved value share.
+    max_recv = info["maxRecv"]
+    recv = max_recv if max_recv > 0 else info["worldSize"] * info["maxTokPerRank"]
+    return (
+        torch.cuda.current_device(),
+        info["worldSize"],
+        recv,
+        info["scaleBytes"],
+        info["maxTokPerRank"],
+        bool(info["aggReserve"]),
+        info["callTokMax"],
+    )
+
+
+def _fallback_staging(info: dict):
+    import torch
+
+    key = _staging_key(info)
+    device = key[0]
+    buf = _FALLBACK_STAGING.get(key)
+    if buf is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "ep_dispatch: staging_base is not bound, and the buffer it falls back "
+                "to cannot be allocated inside a graph capture; bind one "
+                "(info['stagingBytes']) or launch once before capturing"
+            )
+        nbytes = info["stagingBytes"]
+        buf = _FALLBACK_STAGING[key] = torch.zeros(
+            nbytes, dtype=torch.uint8, device=device
+        )
+        warnings.warn(
+            f"ep_dispatch: staging_base is not bound; allocated {nbytes:,} bytes for "
+            "it. Allocate info['stagingBytes'] bytes once (EpDispatchPlan.describe "
+            "gives it before the plan exists), keep them alive, and "
+            "bind(staging_base=buf) on every dispatch plan "
+            "(ROCm/mori#703); this fallback will be removed.",
+            FutureWarning,
+            stacklevel=_caller_stacklevel(),
+        )
+    return buf
+
+
+def _caller_stacklevel() -> int:
+    # The caller's warnings.warn stacklevel for the first frame outside mori.
+    level, frame = 1, sys._getframe(1)
+    while frame is not None and frame.f_code.co_filename.startswith(_BINDING_DIRS):
+        level, frame = level + 1, frame.f_back
+    return level
+
+
+EpCombinePlan = make_plan("ep_combine")
 
 
 # The internode sequence. Eight plans rather than two: its dispatch and combine
@@ -227,5 +233,34 @@ EP_INTERNODE_PLANS = {
         "combine",
         "combine_ll",
         "combineall",
+    )
+}
+
+# AsyncLL. Same Request and Args schema as the internode passes -- it is
+# specialised on the same shape and launched against the same struct -- so the
+# same enum map applies. Nine passes: five for dispatch (three of them the send
+# half, two the recv half) and four for combine.
+EP_ASYNCLL_PLANS = {
+    name: make_plan(f"ep_asyncll_{name}", enums=_INTERNODE_ENUMS)
+    for name in (
+        "dispatch_slotassign",
+        "dispatch_sendcopy",
+        "dispatch_sendtransfer",
+        "dispatch_recvtransfer",
+        "dispatch_recvcopy",
+        "combine_sendcopy",
+        "combine_sendtransfer",
+        "combine_recvtransfer",
+        "combine_recvcopy",
+        # The LSA transport's transfer passes. Same protocol, peer stores instead
+        # of the copy engine; the op picks one set or the other at build time.
+        # dispatch_sendcopy_lsa replaces the sendcopy/sendtransfer PAIR: with no
+        # engine to feed there is no reason to stage, so the gather lands in the
+        # peer and one pass over the payload disappears.
+        "dispatch_sendcopy_lsa",
+        "dispatch_sendtransfer_lsa",
+        "dispatch_recvtransfer_lsa",
+        "combine_sendtransfer_lsa",
+        "combine_recvtransfer_lsa",
     )
 }

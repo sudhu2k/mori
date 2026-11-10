@@ -139,8 +139,8 @@ UMBPConfig WithEmbeddedDefaults(const UMBPConfig& config) {
   // the common case is a cluster member.
   dist.master_config.auto_heartbeat = false;
 
-  // Page size, where 0 means "no opinion".  Both the default and an explicit
-  // value are fitted to the pool: the cliff FitPageSizeToPool guards against --
+  // distributed.dram_page_size uses 0 to mean unspecified. Default and
+  // explicit values are fitted to the pool: the cliff FitPageSizeToPool guards against --
   // a page bigger than the pool means ZERO pages and every put failing with
   // NO_SPACE, silently -- does not care who chose the number, and honouring a
   // deliberate-but-impossible value literally would be a worse answer than
@@ -152,9 +152,13 @@ UMBPConfig WithEmbeddedDefaults(const UMBPConfig& config) {
   // from THIS node's capacity would disagree with a peer sized differently, so
   // an agreed size must survive untouched.  peer_service_port == 0 means no
   // gRPC peer service is bound, hence no peers to disagree with.
-  if (dist.peer_service_port == 0) {
+  // A shared page_size is explicit and stays unchanged. A policy defines its
+  // own capacities, so fitting to config.dram.capacity_bytes would be incorrect.
+  if (dist.peer_service_port == 0 && !config.page_size.has_value()) {
     const uint64_t requested = dist.dram_page_size > 0 ? dist.dram_page_size : EmbeddedPageSize();
-    dist.dram_page_size = FitPageSizeToPool(requested, out.dram.capacity_bytes);
+    dist.dram_page_size = config.backend_policy_path.empty() && dist.backend_policy_path.empty()
+                              ? FitPageSizeToPool(requested, out.dram.capacity_bytes)
+                              : requested;
   }
 
   if (synthesized) {
@@ -174,6 +178,7 @@ UMBPConfig WithEmbeddedDefaults(const UMBPConfig& config) {
     // defaults to true and would silently make every unconfigured caller an SSD
     // node.  Serving SSD is an explicit choice -- set distributed.medium.
     dist.medium = UMBPMedium::DRAM;
+    // An explicit backend policy takes precedence over this default medium.
 
     // Nothing can be remote, so every remote-path resource is off: no ranged
     // scratch arenas to allocate or register, and no re-cache of fetches that
@@ -184,7 +189,7 @@ UMBPConfig WithEmbeddedDefaults(const UMBPConfig& config) {
     dist.local_first = true;
   }
 
-  if (synthesized && out.ssd.enabled) {
+  if (synthesized && out.ssd.enabled && out.backend_policy_path.empty()) {
     MORI_UMBP_WARN(
         "[UMBP] embedded deployment serves DRAM only; the configured SSD tier "
         "(dir='{}', {} MiB) is NOT served. A node serves one medium: set "
@@ -195,20 +200,22 @@ UMBPConfig WithEmbeddedDefaults(const UMBPConfig& config) {
 
   MORI_UMBP_INFO("[UMBP] embedded deployment: node_id='{}' DRAM={} MiB page={} KiB (no master)",
                  dist.master_config.node_id, out.dram.capacity_bytes / (1024 * 1024),
-                 dist.dram_page_size / 1024);
+                 config.page_size.value_or(dist.dram_page_size) / 1024);
 
   out.distributed = dist;
   return out;
 }
 
 std::unique_ptr<IUMBPClient> CreateUMBPClient(const UMBPConfig& config) {
+  std::unique_ptr<IUMBPClient> client;
   if (config.standalone_process.has_value()) {
-    return std::make_unique<standalone::StandaloneProcessClient>(config);
+    client = std::make_unique<standalone::StandaloneProcessClient>(config);
+  } else {
+    // Fill embedded defaults only when no master-led deployment is configured.
+    client = std::make_unique<DistributedClient>(WithEmbeddedDefaults(config));
   }
-  // One class for every in-process store, whether it names a master, names none
-  // but configures itself, or names nothing at all.  WithEmbeddedDefaults fills
-  // whatever was left blank and returns a cluster member's config untouched.
-  return std::make_unique<DistributedClient>(WithEmbeddedDefaults(config));
+  if (config.kv_indexer) client->ConfigureKvIndexer(*config.kv_indexer);
+  return client;
 }
 
 }  // namespace mori::umbp

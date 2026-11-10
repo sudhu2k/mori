@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -57,6 +58,12 @@ enum class TierType : int {
 // triple each.
 inline constexpr uint32_t kMaxBackendsPerPeer = 16;
 
+// Object bytes [offset, offset + length) a reader will touch; length 0 = all.
+struct ObjectExtent {
+  uint64_t offset = 0;
+  uint64_t length = 0;
+};
+
 struct TierCapacity {
   uint64_t total_bytes = 0;
   uint64_t available_bytes = 0;
@@ -74,14 +81,31 @@ struct LogicalTierCapacity {
   // tier it aggregates every tier reachable by offload, so neither of its
   // ratios can be checked against this tier's watermarks.
   double peak_member_utilization = 0.0;
+  // Smaller objects would land only on members whose min_object_size they are under.
+  uint64_t min_object_bytes = 0;
 };
 
 struct TierTransitionMetrics {
   uint64_t attempted = 0;
   uint64_t succeeded = 0;
   uint64_t failed = 0;
+  uint64_t dropped = 0;         // evicted copies whose demotion never landed (lost keys)
+  uint64_t retried = 0;         // eviction demotions re-queued after a retryable failure
+  uint64_t promote_failed = 0;  // of `failed`, promotions (the read stays on the source)
   uint64_t offloaded_bytes = 0;
   uint64_t promoted_bytes = 0;
+  std::map<std::string, uint64_t> read_bytes;   // read off each source medium, by TierTypeName
+  std::map<std::string, uint64_t> write_bytes;  // committed into each target medium
+};
+
+// Local watermark eviction counters; bytes freed are counted by
+// InstrumentedBackend.
+struct LocalEvictionMetrics {
+  uint64_t rounds = 0;        // passes that found a backend over its high watermark
+  uint64_t keys = 0;          // keys dropped or queued for demotion
+  uint64_t no_candidate = 0;  // passes where every key was leased or pinned
+  uint64_t stalled = 0;       // batches that freed nothing; the next wake retries
+  uint64_t master_keys = 0;   // of `keys`, those the candidate source ranked
 };
 
 struct ExternalKvHitCountEntry {
@@ -118,6 +142,17 @@ struct NodeTierKey {
   bool operator==(const NodeTierKey& o) const { return node_id == o.node_id && tier == o.tier; }
 };
 
+// Number of *distinct* hashes across tier buckets (size of the union): a hash
+// held on both HBM and DRAM counts once.  Shared by every match-result type.
+inline size_t CountDistinctHashes(
+    const std::map<TierType, std::vector<std::string>>& hashes_by_tier) {
+  std::unordered_set<std::string_view> seen;
+  for (const auto& [tier, hashes] : hashes_by_tier) {
+    for (const auto& h : hashes) seen.insert(h);
+  }
+  return seen.size();
+}
+
 // One node's external-KV match result, grouped by tier.  A single hash may
 // appear in MORE THAN ONE tier bucket when a node holds multiple physical
 // copies (e.g. HBM + DRAM mirror).  std::map iterates in sorted TierType
@@ -128,13 +163,7 @@ struct NodeMatch {
   std::string node_id;
   std::map<TierType, std::vector<std::string>> hashes_by_tier;
 
-  size_t MatchedHashCount() const {
-    std::unordered_set<std::string_view> seen;
-    for (const auto& [tier, hashes] : hashes_by_tier) {
-      for (const auto& h : hashes) seen.insert(h);
-    }
-    return seen.size();
-  }
+  size_t MatchedHashCount() const { return CountDistinctHashes(hashes_by_tier); }
 };
 
 enum class ClientStatus : int {
@@ -158,6 +187,26 @@ struct EvictionCandidate {
   Location location;
   std::chrono::system_clock::time_point last_accessed_at;
   uint64_t size;
+};
+
+// One master eviction decision: free `key`'s copy on the `tier` medium.
+struct EvictionVictim {
+  std::string key;
+  TierType tier = TierType::UNKNOWN;
+
+  bool operator==(const EvictionVictim& other) const {
+    return key == other.key && tier == other.tier;
+  }
+};
+
+// A key offered for local eviction, with the (page-rounded) bytes it frees.
+struct EvictionOffer {
+  std::string key;
+  uint64_t bytes = 0;
+
+  bool operator==(const EvictionOffer& other) const {
+    return key == other.key && bytes == other.bytes;
+  }
 };
 
 // Ordering hint for IMasterMetadataStore::EnumerateEvictionCandidates.  This is
