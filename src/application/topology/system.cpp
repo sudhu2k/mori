@@ -22,6 +22,8 @@
 #include "mori/application/topology/system.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -50,30 +52,57 @@ void TopoSystem::Load() {
   net.reset(new TopoSystemNet());
 }
 
+namespace {
+
+// The KFD sysfs node of every GPU on the host, keyed by PCI bus id. HIP numbers
+// the GPUs it can see in this order, and sysfs lists all of them regardless of
+// HIP_VISIBLE_DEVICES or of which GPUs a container exposes.
+std::unordered_map<uint64_t, long> KfdNodeByBusId() {
+  namespace fs = std::filesystem;
+  std::unordered_map<uint64_t, long> nodes;
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator("/sys/class/kfd/kfd/topology/nodes", ec)) {
+    long node = std::strtol(entry.path().filename().c_str(), nullptr, 10);
+    std::ifstream gpuId(entry.path() / "gpu_id");
+    uint64_t id = 0;
+    if (!(gpuId >> id) || id == 0) continue;
+
+    std::ifstream props(entry.path() / "properties");
+    std::string key;
+    uint64_t value = 0, location = 0, domain = 0;
+    bool hasLocation = false;
+    while (props >> key >> value) {
+      if (key == "location_id") {
+        location = value;
+        hasLocation = true;
+      } else if (key == "domain") {
+        domain = value;
+      }
+    }
+    if (!hasLocation) continue;
+    PciBusId bus(static_cast<uint16_t>(domain), static_cast<uint8_t>(location >> 8),
+                 static_cast<uint8_t>((location >> 3) & 0x1f), static_cast<uint8_t>(location & 0x7));
+    nodes[bus.packed] = node;
+  }
+  return nodes;
+}
+
+}  // namespace
+
 struct Candidate {
   TopoPathPci* path{nullptr};
   TopoNodePci* node{nullptr};
   TopoNodeNic* nic{nullptr};
 };
 
-std::vector<Candidate> CollectAndSortCandidates(TopoSystem* sys, int id) {
-  assert(sys != nullptr);
+std::vector<Candidate> SortCandidates(TopoSystem* sys, TopoNodeGpu* dev) {
+  assert(sys != nullptr && dev != nullptr);
 
-  TopoSystemGpu* gpu = sys->GetTopoSystemGpu();
   TopoSystemPci* pci = sys->GetTopoSystemPci();
   TopoSystemNet* net = sys->GetTopoSystemNet();
 
-  TopoNodeGpu* dev = gpu->GetGpuByLogicalId(id);
-  if (dev == nullptr) {
-    MORI_APP_WARN("Topology: GPU logical id {} not found; no NIC candidates", id);
-    return {};
-  }
   TopoNodePci* devPci = pci->Node(dev->busId);
-  if (devPci == nullptr) {
-    MORI_APP_WARN("Topology: GPU {} bdf {} not in PCI tree; no NIC candidates", id,
-                  dev->busId.String());
-    return {};
-  }
+  if (devPci == nullptr) return {};
   NumaNodeId gpuNumaNodeId = devPci->NumaNode();
 
   // Collect nic candidates
@@ -105,6 +134,22 @@ std::vector<Candidate> CollectAndSortCandidates(TopoSystem* sys, int id) {
             });
 
   return candidates;
+}
+
+std::vector<Candidate> CollectAndSortCandidates(TopoSystem* sys, int id) {
+  assert(sys != nullptr);
+
+  TopoNodeGpu* dev = sys->GetTopoSystemGpu()->GetGpuByLogicalId(id);
+  if (dev == nullptr) {
+    MORI_APP_WARN("Topology: GPU logical id {} not found; no NIC candidates", id);
+    return {};
+  }
+  if (sys->GetTopoSystemPci()->Node(dev->busId) == nullptr) {
+    MORI_APP_WARN("Topology: GPU {} bdf {} not in PCI tree; no NIC candidates", id,
+                  dev->busId.String());
+    return {};
+  }
+  return SortCandidates(sys, dev);
 }
 
 std::string TopoSystem::MatchGpuAndNic(int id) {
@@ -174,32 +219,52 @@ std::vector<std::string> TopoSystem::MatchCpuNics(int numaNode, int k) {
   return matches;
 }
 
+// NICs are handed out over every GPU on the host, in the order HIP numbers them
+// when all are visible, not only over the GPUs this process can see. Otherwise a
+// process limited by HIP_VISIBLE_DEVICES to one GPU always gets the first NIC of
+// that GPU's NUMA node, so several such processes share one NIC while the NICs of
+// their own GPUs sit idle.
 std::vector<std::string> TopoSystem::MatchAllGpusAndNics() {
+  std::vector<TopoNodeGpu*> hostGpus = gpu->GetGpus();
+  std::unordered_map<uint64_t, long> kfdNode = KfdNodeByBusId();
+  auto order = [&kfdNode](TopoNodeGpu* g) {
+    auto it = kfdNode.find(g->busId.packed);
+    return std::make_pair(it == kfdNode.end() ? std::numeric_limits<long>::max() : it->second,
+                          g->busId.packed);
+  };
+  std::sort(hostGpus.begin(), hostGpus.end(),
+            [&order](TopoNodeGpu* a, TopoNodeGpu* b) { return order(a) < order(b); });
+
+  std::unordered_map<uint64_t, std::string> nicByBusId;
+  std::unordered_set<std::string> matched;
+
+  for (size_t i = 0; i < hostGpus.size(); i++) {
+    std::vector<Candidate> candidates = SortCandidates(this, hostGpus[i]);
+    if (candidates.empty()) continue;
+
+    std::string& nic = nicByBusId[hostGpus[i]->busId.packed];
+    for (auto& cand : candidates) {
+      if (matched.insert(cand.nic->name).second) {
+        nic = cand.nic->name;
+        break;
+      }
+    }
+    if (nic.empty()) nic = candidates[i % candidates.size()].nic->name;
+  }
+
   int count;
   HIP_RUNTIME_CHECK(hipGetDeviceCount(&count));
 
   std::vector<std::string> matches;
-  std::unordered_set<std::string> matched;
-
   for (int i = 0; i < count; i++) {
-    std::vector<Candidate> candidates = CollectAndSortCandidates(this, i);
-    if (candidates.empty()) {
+    TopoNodeGpu* dev = gpu->GetGpuByLogicalId(i);
+    auto it = (dev == nullptr) ? nicByBusId.end() : nicByBusId.find(dev->busId.packed);
+    if (it == nicByBusId.end()) {
+      MORI_APP_WARN("Topology: GPU logical id {} has no NIC candidates", i);
       matches.push_back("");
       continue;
     }
-
-    bool found = false;
-    for (auto& cand : candidates) {
-      std::string name = cand.nic->name;
-      if (matched.find(name) == matched.end()) {
-        matches.push_back(name);
-        matched.insert(name);
-        found = true;
-        break;
-      }
-    }
-
-    if (!found) matches.push_back(candidates[i % candidates.size()].nic->name);
+    matches.push_back(it->second);
   }
 
   return matches;

@@ -57,9 +57,23 @@ class XgmiBackendSession : public BackendSession {
                       const SizeVec& sizes, TransferStatus* status, TransferUniqueId id,
                       bool isRead) override;
 
+  // Strided entries go as 2D copies, the rest as in BatchReadWrite, all on one stream.
+  void BatchReadWriteStrided(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
+                             const SizeVec& sizes, const SizeVec& rows,
+                             const SizeVec& localPitches, const SizeVec& remotePitches,
+                             TransferStatus* status, TransferUniqueId id, bool isRead);
+
   bool Alive() const override;
 
+  struct Rect {
+    size_t localOff, remoteOff, sz, rows, localPitch, remotePitch;
+  };
+
  private:
+  void IssueBatch(const SizeVec& localOffsets, const SizeVec& remoteOffsets, const SizeVec& sizes,
+                  std::vector<Rect> rects, TransferStatus* status, TransferUniqueId id,
+                  bool isRead);
+
   XgmiBackendConfig config{};
   void* localAddr{nullptr};
   void* remoteAddr{nullptr};
@@ -91,6 +105,14 @@ class XgmiBackend : public Backend {
                       const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
                       const SizeVec& sizes, TransferStatus* status, TransferUniqueId id,
                       bool isRead) override;
+  void BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
+                             const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
+                             const SizeVec& sizes, const SizeVec& rows,
+                             const SizeVec& localPitches, const SizeVec& remotePitches,
+                             TransferStatus* status, TransferUniqueId id, bool isRead) override;
+  void BatchCopy(int device, const MemoryDesc& dst, const SizeVec& dstOffsets,
+                 const MemoryDesc& src, const SizeVec& srcOffsets, const SizeVec& sizes,
+                 TransferStatus* status, TransferUniqueId id) override;
   BackendSession* CreateSession(const MemoryDesc& local, const MemoryDesc& remote) override;
   bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id,
                                 TransferStatus* status) override;

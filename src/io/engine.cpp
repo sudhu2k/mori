@@ -657,6 +657,76 @@ void IOEngine::BatchRead(const MemDescVec& localDest, const BatchSizeVec& localO
   }
 }
 
+void IOEngine::BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec& localOffsets,
+                                const MemDescVec& remoteSrc, const BatchSizeVec& remoteOffsets,
+                                const BatchSizeVec& sizes, const BatchSizeVec& rows,
+                                const BatchSizeVec& localPitches,
+                                const BatchSizeVec& remotePitches, TransferStatusPtrVec& status,
+                                TransferUniqueIdVec& ids) {
+  MORI_IO_FUNCTION_TIMER;
+  size_t batchSize = localDest.size();
+  assert(batchSize == remoteSrc.size());
+  assert(batchSize == localOffsets.size());
+  assert(batchSize == remoteOffsets.size());
+  assert(batchSize == sizes.size());
+  assert(batchSize == rows.size());
+  assert(batchSize == localPitches.size());
+  assert(batchSize == remotePitches.size());
+  assert(batchSize == status.size());
+  assert(batchSize == ids.size());
+
+  for (size_t i = 0; i < batchSize; i++) {
+    std::shared_ptr<internal::IoCallDiagnostics> diagnostics;
+    internal::ScopedIoCallDiagnosticsCapture capture(&diagnostics, "Engine strided batch read");
+    const size_t n = sizes[i].size();
+    if (localOffsets[i].size() != n || remoteOffsets[i].size() != n || rows[i].size() != n ||
+        localPitches[i].size() != n || remotePitches[i].size() != n) {
+      status[i]->Update(StatusCode::ERR_INVALID_ARGS,
+                        "Engine strided batch read: per-entry lists differ in length");
+      continue;
+    }
+    Backend* backend = nullptr;
+    SELECT_BACKEND_AND_RETURN_IF_NONE(localDest[i], remoteSrc[i], status[i], backend);
+    backend->BatchReadWriteStrided(localDest[i], localOffsets[i], remoteSrc[i], remoteOffsets[i],
+                                   sizes[i], rows[i], localPitches[i], remotePitches[i],
+                                   status[i], ids[i], true);
+    if (status[i]->Failed()) {
+      LogTransferFailure(diagnostics, "Engine strided batch read error {} message {}",
+                         status[i]->CodeUint32(), status[i]->Message());
+    }
+  }
+}
+
+void IOEngine::BatchCopy(int device, const MemDescVec& dst, const BatchSizeVec& dstOffsets,
+                         const MemDescVec& src, const BatchSizeVec& srcOffsets,
+                         const BatchSizeVec& sizes, TransferStatusPtrVec& status,
+                         TransferUniqueIdVec& ids) {
+  MORI_IO_FUNCTION_TIMER;
+  size_t batchSize = dst.size();
+  assert(batchSize == src.size());
+  assert(batchSize == dstOffsets.size());
+  assert(batchSize == srcOffsets.size());
+  assert(batchSize == sizes.size());
+  assert(batchSize == status.size());
+  assert(batchSize == ids.size());
+
+  auto xgmiIt = backends.find(BackendType::XGMI);
+  for (size_t i = 0; i < batchSize; i++) {
+    if (xgmiIt == backends.end()) {
+      status[i]->Update(StatusCode::ERR_BAD_STATE, "Engine copy needs an XGMI backend");
+      continue;
+    }
+    std::shared_ptr<internal::IoCallDiagnostics> diagnostics;
+    internal::ScopedIoCallDiagnosticsCapture capture(&diagnostics, "Engine batch copy");
+    xgmiIt->second->BatchCopy(device, dst[i], dstOffsets[i], src[i], srcOffsets[i], sizes[i],
+                              status[i], ids[i]);
+    if (status[i]->Failed()) {
+      LogTransferFailure(diagnostics, "Engine batch copy error {} message {}",
+                         status[i]->CodeUint32(), status[i]->Message());
+    }
+  }
+}
+
 void IOEngine::BatchWrite(const MemDescVec& localSrc, const BatchSizeVec& localOffsets,
                           const MemDescVec& remoteDest, const BatchSizeVec& remoteOffsets,
                           const BatchSizeVec& sizes, TransferStatusPtrVec& status,

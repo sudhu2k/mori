@@ -212,6 +212,33 @@ class Backend {
     BatchReadWrite(localDest, localOffsets, remoteSrc, remoteOffsets, sizes, status, id, true);
   }
 
+  // Entry i is rows[i] rows of sizes[i] bytes, localPitches[i] / remotePitches[i] bytes apart
+  // on each side. Backends without a strided copy transfer each row as its own entry.
+  virtual void BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
+                                     const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
+                                     const SizeVec& sizes, const SizeVec& rows,
+                                     const SizeVec& localPitches, const SizeVec& remotePitches,
+                                     TransferStatus* status, TransferUniqueId id, bool isRead) {
+    SizeVec lo, ro, sz;
+    for (size_t i = 0; i < sizes.size(); ++i) {
+      for (size_t r = 0; r < rows[i]; ++r) {
+        lo.push_back(localOffsets[i] + r * localPitches[i]);
+        ro.push_back(remoteOffsets[i] + r * remotePitches[i]);
+        sz.push_back(sizes[i]);
+      }
+    }
+    BatchReadWrite(localDest, lo, remoteSrc, ro, sz, status, id, isRead);
+  }
+
+  // Copies between two memories, typically both of other engines on this node, on this
+  // engine's GPU `device`: the bytes go src GPU -> device -> dst GPU. Lets a GPU relay
+  // traffic between two others over its own links instead of their direct one.
+  virtual void BatchCopy(int device, const MemoryDesc& dst, const SizeVec& dstOffsets,
+                         const MemoryDesc& src, const SizeVec& srcOffsets, const SizeVec& sizes,
+                         TransferStatus* status, TransferUniqueId id) {
+    status->Update(StatusCode::ERR_INVALID_ARGS, "BatchCopy is not supported by this backend");
+  }
+
   virtual BackendSession* CreateSession(const MemoryDesc& local, const MemoryDesc& remote) = 0;
 
   virtual bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id,

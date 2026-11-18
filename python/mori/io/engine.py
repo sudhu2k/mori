@@ -223,6 +223,61 @@ class IOEngine:
     def batch_read(self, *args):
         return self._batch_single_side_transfer(self._engine.BatchRead, *args)
 
+    def batch_read_strided(
+        self,
+        local_dest_mem_desc,
+        local_offsets,
+        remote_src_mem_desc,
+        remote_offsets,
+        sizes,
+        rows,
+        local_pitches,
+        remote_pitches,
+        transfer_uid,
+    ):
+        """batch_read where entry j of batch i is rows[i][j] rows of sizes[i][j] bytes, rows
+        local_pitches[i][j] bytes apart locally and remote_pitches[i][j] remotely."""
+        transfer_status = [mori_cpp.TransferStatus() for _ in range(len(sizes))]
+        self._engine.BatchReadStrided(
+            local_dest_mem_desc,
+            local_offsets,
+            remote_src_mem_desc,
+            remote_offsets,
+            sizes,
+            rows,
+            local_pitches,
+            remote_pitches,
+            transfer_status,
+            transfer_uid,
+        )
+        return transfer_status
+
+    def batch_copy(
+        self,
+        device,
+        dst_mem_desc,
+        dst_offsets,
+        src_mem_desc,
+        src_offsets,
+        sizes,
+        transfer_uid,
+    ):
+        """Batch i copies sizes[i][j] bytes from src_mem_desc[i] to dst_mem_desc[i] on this
+        process's GPU ``device``, typically between two other engines' memories on this node,
+        so the bytes take this GPU's XGMI links instead of the pair's direct one."""
+        transfer_status = [mori_cpp.TransferStatus() for _ in range(len(sizes))]
+        self._engine.BatchCopy(
+            int(device),
+            dst_mem_desc,
+            dst_offsets,
+            src_mem_desc,
+            src_offsets,
+            sizes,
+            transfer_status,
+            transfer_uid,
+        )
+        return transfer_status
+
     def batch_write(self, *args):
         return self._batch_single_side_transfer(self._engine.BatchWrite, *args)
 

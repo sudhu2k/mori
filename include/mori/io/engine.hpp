@@ -102,6 +102,20 @@ class IOEngine {
                   const MemDescVec& remoteDest, const BatchSizeVec& remoteOffsets,
                   const BatchSizeVec& sizes, TransferStatusPtrVec& status,
                   TransferUniqueIdVec& ids);
+  // BatchRead where entry j of batch i is rows[i][j] rows of sizes[i][j] bytes, rows
+  // localPitches[i][j] bytes apart locally and remotePitches[i][j] remotely.
+  void BatchReadStrided(const MemDescVec& localDest, const BatchSizeVec& localOffsets,
+                        const MemDescVec& remoteSrc, const BatchSizeVec& remoteOffsets,
+                        const BatchSizeVec& sizes, const BatchSizeVec& rows,
+                        const BatchSizeVec& localPitches, const BatchSizeVec& remotePitches,
+                        TransferStatusPtrVec& status, TransferUniqueIdVec& ids);
+  // Batch i copies sizes[i][j] bytes from src[i] + srcOffsets[i][j] to dst[i] +
+  // dstOffsets[i][j] on this process's GPU `device`, typically between two other engines'
+  // memories on this node, so the bytes take this GPU's XGMI links. XGMI only.
+  void BatchCopy(int device, const MemDescVec& dst, const BatchSizeVec& dstOffsets,
+                 const MemDescVec& src, const BatchSizeVec& srcOffsets,
+                 const BatchSizeVec& sizes, TransferStatusPtrVec& status,
+                 TransferUniqueIdVec& ids);
   // Take the transfer status of an inbound op
   bool PopInboundTransferStatus(EngineKey remote, TransferUniqueId id, TransferStatus* status);
   // Takes the oldest pending peer failure across all backends. False means

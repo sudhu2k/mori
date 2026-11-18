@@ -173,6 +173,93 @@ void ArmTransferCompletion(TransferStatus* status, hipEvent_t event, int eventDe
   status->SetProgressCallback([completion]() { completion->FinalizeNonBlocking(); });
 }
 
+using Rect = XgmiBackendSession::Rect;
+
+// MORI_IO_XGMI_SDMA_RECT=0 copies strided entries row by row, as for any other entries.
+bool RectCopiesEnabled() {
+  static const bool enabled = []() {
+    const char* v = mori::env::Get("MORI_IO_XGMI_SDMA_RECT");
+    const bool on = v == nullptr || v[0] == '\0' || mori::env::detail::ParseBool(v).value_or(true);
+    if (!on) MORI_IO_INFO("XGMI: MORI_IO_XGMI_SDMA_RECT=0; strided entries are copied row by row");
+    return on;
+  }();
+  return enabled;
+}
+
+// ROCm 10.3 (HIP 7.18) runs a batch of 2D copies to one peer on the SDMA engine of that
+// link. Earlier runtimes copy correctly, but as kernels or on one shared queue.
+void WarnIfRectCopiesSlow() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    int version = 0;
+    if (hipRuntimeGetVersion(&version) != hipSuccess) {
+      (void)hipGetLastError();
+      return;
+    }
+    if (version < 71800000)
+      MORI_IO_WARN(
+          "XGMI: HIP {}.{} copies strided entries between GPUs at a fraction of link bandwidth; "
+          "ROCm 10.3 or newer runs them on the link's SDMA engine",
+          version / 10000000, version / 100000 % 100);
+  });
+}
+
+// Issues rects as 2D copies on stream. Between GPUs they go as one batch, which ROCr runs on
+// the link's SDMA engine; within one GPU HIP's copy kernels are faster than SDMA. Returns
+// false, with nothing left in flight, if HIP rejects one; the caller then copies them row by row.
+bool IssueRectCopies(const std::vector<Rect>& rects, bool isRead, bool sameGpu, char* localBase,
+                     char* remoteBase, hipStream_t stream) {
+  if (!RectCopiesEnabled()) return false;
+  if (sameGpu) {
+    for (const Rect& rc : rects) {
+      char* local = localBase + rc.localOff;
+      char* remote = remoteBase + rc.remoteOff;
+      hipError_t err =
+          isRead ? hipMemcpy2DAsync(local, rc.localPitch, remote, rc.remotePitch, rc.sz, rc.rows,
+                                    hipMemcpyDeviceToDevice, stream)
+                 : hipMemcpy2DAsync(remote, rc.remotePitch, local, rc.localPitch, rc.sz, rc.rows,
+                                    hipMemcpyDeviceToDevice, stream);
+      if (err != hipSuccess) {
+        (void)hipGetLastError();
+        (void)hipStreamSynchronize(stream);
+        return false;
+      }
+    }
+    return true;
+  }
+#if HIP_VERSION >= 70100000
+  WarnIfRectCopiesSlow();
+  std::vector<hipMemcpy3DBatchOp> ops(rects.size());
+  for (size_t i = 0; i < rects.size(); ++i) {
+    const Rect& rc = rects[i];
+    auto operand = [&](char* base, size_t off, size_t pitch) {
+      hipMemcpy3DOperand o{};
+      o.type = hipMemcpyOperandTypePointer;
+      o.op.ptr.ptr = base + off;
+      o.op.ptr.rowLength = pitch;
+      o.op.ptr.layerHeight = rc.rows;
+      return o;
+    };
+    hipMemcpy3DOperand local = operand(localBase, rc.localOff, rc.localPitch);
+    hipMemcpy3DOperand remote = operand(remoteBase, rc.remoteOff, rc.remotePitch);
+    ops[i].src = isRead ? remote : local;
+    ops[i].dst = isRead ? local : remote;
+    ops[i].extent = make_hipExtent(rc.sz, rc.rows, 1);
+    ops[i].srcAccessOrder = hipMemcpySrcAccessOrderStream;
+  }
+  // ROCm 7.2 dereferences failIdx unchecked.
+  size_t failIdx = 0;
+  if (hipMemcpy3DBatchAsync(ops.size(), ops.data(), &failIdx, 0, stream) != hipSuccess) {
+    (void)hipGetLastError();
+    (void)hipStreamSynchronize(stream);
+    return false;
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
 }  // namespace
 
 /* ---------------------------------------------------------------------------------------------- */
@@ -255,12 +342,39 @@ void XgmiBackendSession::ReadWrite(size_t localOffset, size_t remoteOffset, size
 void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
                                         const SizeVec& sizes, TransferStatus* status,
                                         TransferUniqueId id, bool isRead) {
+  IssueBatch(localOffsets, remoteOffsets, sizes, {}, status, id, isRead);
+}
+
+void XgmiBackendSession::BatchReadWriteStrided(const SizeVec& localOffsets,
+                                               const SizeVec& remoteOffsets, const SizeVec& sizes,
+                                               const SizeVec& rows, const SizeVec& localPitches,
+                                               const SizeVec& remotePitches, TransferStatus* status,
+                                               TransferUniqueId id, bool isRead) {
+  SizeVec lo, ro, sz;
+  std::vector<Rect> rects;
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    if (sizes[i] == 0 || rows[i] == 0) continue;
+    if (rows[i] == 1 || (localPitches[i] == sizes[i] && remotePitches[i] == sizes[i])) {
+      lo.push_back(localOffsets[i]);
+      ro.push_back(remoteOffsets[i]);
+      sz.push_back(sizes[i] * rows[i]);
+    } else {
+      rects.push_back({localOffsets[i], remoteOffsets[i], sizes[i], rows[i], localPitches[i],
+                       remotePitches[i]});
+    }
+  }
+  IssueBatch(lo, ro, sz, std::move(rects), status, id, isRead);
+}
+
+void XgmiBackendSession::IssueBatch(const SizeVec& localOffsets, const SizeVec& remoteOffsets,
+                                    const SizeVec& sizes, std::vector<Rect> rects,
+                                    TransferStatus* status, TransferUniqueId id, bool isRead) {
   ScopedHipDeviceGuard deviceGuard;
   size_t batchSize = sizes.size();
   assert(batchSize == localOffsets.size());
   assert(batchSize == remoteOffsets.size());
 
-  if (batchSize == 0) {
+  if (batchSize == 0 && rects.empty()) {
     status->SetCode(StatusCode::SUCCESS);
     return;
   }
@@ -323,9 +437,35 @@ void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
     segments.push_back({localOffsets[idx], remoteOffsets[idx], sizes[idx]});
   }
 
+  // Strided entries go first, on the same stream; if HIP rejects them, their rows join the rest.
+  const bool rectsIssued =
+      !rects.empty() && IssueRectCopies(rects, isRead, srcDevice == dstDevice,
+                                        static_cast<char*>(localAddr),
+                                        static_cast<char*>(remoteAddr), stream);
+  if (!rects.empty() && !rectsIssued) {
+    for (const Rect& rc : rects)
+      for (size_t r = 0; r < rc.rows; ++r)
+        segments.push_back(
+            {rc.localOff + r * rc.localPitch, rc.remoteOff + r * rc.remotePitch, rc.sz});
+  }
+
   if (segments.empty()) {
-    status->SetCode(StatusCode::SUCCESS);
-    eventPool->PutEvent(event, kernelDevice);
+    if (!rectsIssued) {
+      status->SetCode(StatusCode::SUCCESS);
+      eventPool->PutEvent(event, kernelDevice);
+      return;
+    }
+    err = hipEventRecord(event, stream);
+    if (err != hipSuccess) {
+      status->Update(StatusCode::ERR_GPU_OP,
+                     std::string("XGMI: hipEventRecord failed: ") + hipGetErrorString(err));
+      eventPool->PutEvent(event, kernelDevice);
+      return;
+    }
+    status->SetCode(StatusCode::IN_PROGRESS);
+    ArmTransferCompletion(status, event, kernelDevice, eventPool);
+    MORI_IO_TRACE("XGMI: Batch transfer via 2D copies, id={}, rects={}, isRead={}", id,
+                  rects.size(), isRead);
     return;
   }
 
@@ -410,7 +550,7 @@ void XgmiBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
   // Fallback: individual hipMemcpy per merged segment — always uses dstDevice
   // because hipMemcpyPeerAsync handles cross-device routing internally.
   int eventDevice = kernelDevice;
-  if (kernelOnLocal) {
+  if (kernelOnLocal && !rectsIssued) {
     (void)hipSetDevice(dstDevice);
     hipStream_t memcpyStream = streamPool->GetNextStream(dstDevice);
     hipEvent_t memcpyEvent = eventPool->GetEvent(dstDevice);
@@ -925,6 +1065,90 @@ void XgmiBackend::BatchReadWrite(const MemoryDesc& localDest, const SizeVec& loc
   }
 
   sess->BatchReadWrite(localOffsets, remoteOffsets, sizes, status, id, isRead);
+}
+
+void XgmiBackend::BatchReadWriteStrided(const MemoryDesc& localDest, const SizeVec& localOffsets,
+                                        const MemoryDesc& remoteSrc, const SizeVec& remoteOffsets,
+                                        const SizeVec& sizes, const SizeVec& rows,
+                                        const SizeVec& localPitches,
+                                        const SizeVec& remotePitches, TransferStatus* status,
+                                        TransferUniqueId id, bool isRead) {
+  XgmiBackendSession* sess = GetOrCreateSessionCached(localDest, remoteSrc);
+  if (sess == nullptr) {
+    status->Update(StatusCode::ERR_BAD_STATE, "XGMI: Failed to create session");
+    return;
+  }
+
+  sess->BatchReadWriteStrided(localOffsets, remoteOffsets, sizes, rows, localPitches,
+                              remotePitches, status, id, isRead);
+}
+
+// HIP runs a copy on the copy engines of the GPU its stream belongs to, so a copy between
+// two other GPUs issued here travels over this GPU's links to each of them. HIP before 7.15
+// (no ROCm/rocm-systems#4073) picks the engine number from the source GPU's table, so these
+// copies can share an engine with this GPU's own reads and gain nothing.
+void XgmiBackend::BatchCopy(int device, const MemoryDesc& dst, const SizeVec& dstOffsets,
+                            const MemoryDesc& src, const SizeVec& srcOffsets, const SizeVec& sizes,
+                            TransferStatus* status, TransferUniqueId id) {
+  ScopedHipDeviceGuard deviceGuard;
+  if (dstOffsets.size() != sizes.size() || srcOffsets.size() != sizes.size()) {
+    status->Update(StatusCode::ERR_INVALID_ARGS, "XGMI: copy offset and size lists differ");
+    return;
+  }
+  char* dstBase = static_cast<char*>(GetRemappedAddress(dst, device));
+  char* srcBase = static_cast<char*>(GetRemappedAddress(src, device));
+  if (dstBase == nullptr || srcBase == nullptr) {
+    status->Update(StatusCode::ERR_BAD_STATE,
+                   "XGMI: copy could not map memory (dst id=" + std::to_string(dst.id) +
+                       ", src id=" + std::to_string(src.id) + ")");
+    return;
+  }
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    if (dstOffsets[i] + sizes[i] > dst.size || srcOffsets[i] + sizes[i] > src.size) {
+      status->Update(StatusCode::ERR_INVALID_ARGS, "XGMI: copy entry out of bounds");
+      return;
+    }
+  }
+
+  hipError_t err = hipSetDevice(device);
+  if (err != hipSuccess) {
+    status->Update(StatusCode::ERR_GPU_OP,
+                   std::string("XGMI: Failed to set device: ") + hipGetErrorString(err));
+    return;
+  }
+  hipStream_t stream = streamPool->GetNextStream(device);
+  hipEvent_t event = eventPool->GetEvent(device);
+  if (stream == nullptr || event == nullptr) {
+    status->Update(StatusCode::ERR_BAD_STATE, "XGMI: Failed to get stream or event from pool");
+    if (event != nullptr) eventPool->PutEvent(event, device);
+    return;
+  }
+
+  size_t i = 0, n = sizes.size();
+  while (i < n) {
+    size_t dOff = dstOffsets[i], sOff = srcOffsets[i], sz = sizes[i];
+    for (++i; i < n && dstOffsets[i] == dOff + sz && srcOffsets[i] == sOff + sz; ++i) {
+      sz += sizes[i];
+    }
+    if (sz == 0) continue;
+    err = hipMemcpyAsync(dstBase + dOff, srcBase + sOff, sz, hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+      status->Update(StatusCode::ERR_GPU_OP,
+                     std::string("XGMI: copy failed: ") + hipGetErrorString(err));
+      eventPool->PutEvent(event, device);
+      return;
+    }
+  }
+  err = hipEventRecord(event, stream);
+  if (err != hipSuccess) {
+    status->Update(StatusCode::ERR_GPU_OP,
+                   std::string("XGMI: hipEventRecord failed: ") + hipGetErrorString(err));
+    eventPool->PutEvent(event, device);
+    return;
+  }
+  status->SetCode(StatusCode::IN_PROGRESS);
+  ArmTransferCompletion(status, event, device, eventPool.get());
+  MORI_IO_TRACE("XGMI: Copy issued on device {}, id={}, entries={}", device, id, n);
 }
 
 BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const MemoryDesc& remote) {
