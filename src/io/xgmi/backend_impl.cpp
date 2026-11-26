@@ -186,6 +186,16 @@ bool RectCopiesEnabled() {
   return enabled;
 }
 
+// MORI_IO_XGMI_HIDDEN_BATCH=0: strided entries of a hidden-device session go through the same-GPU
+// per-entry hipMemcpy2DAsync loop, as before.
+bool HiddenBatchEnabled() {
+  static const bool on = []() {
+    const char* v = mori::env::Get("MORI_IO_XGMI_HIDDEN_BATCH");
+    return v == nullptr || v[0] == '\0' || mori::env::detail::ParseBool(v).value_or(true);
+  }();
+  return on;
+}
+
 // ROCm 10.3 (HIP 7.18) runs a batch of 2D copies to one peer on the SDMA engine of that
 // link. Earlier runtimes copy correctly, but as kernels or on one shared queue.
 void WarnIfRectCopiesSlow() {
@@ -439,7 +449,7 @@ void XgmiBackendSession::IssueBatch(const SizeVec& localOffsets, const SizeVec& 
 
   // Strided entries go first, on the same stream; if HIP rejects them, their rows join the rest.
   const bool rectsIssued =
-      !rects.empty() && IssueRectCopies(rects, isRead, srcDevice == dstDevice,
+      !rects.empty() && IssueRectCopies(rects, isRead, srcDevice == dstDevice && !(hiddenRemote && HiddenBatchEnabled()),
                                         static_cast<char*>(localAddr),
                                         static_cast<char*>(remoteAddr), stream);
   if (!rects.empty() && !rectsIssued) {
@@ -1225,8 +1235,10 @@ BackendSession* XgmiBackend::CreateSession(const MemoryDesc& local, const Memory
 
   MORI_IO_INFO("XGMI: Created hidden-device IPC session (local id={}, remote id={}, device={})",
                local.id, remote.id, localDevice);
-  return new XgmiBackendSession(config, localAddr, remoteAddr, localDevice, localDevice, true, this,
-                                streamPool.get(), eventPool.get());
+  auto* hidden = new XgmiBackendSession(config, localAddr, remoteAddr, localDevice, localDevice,
+                                        true, this, streamPool.get(), eventPool.get());
+  hidden->hiddenRemote = true;
+  return hidden;
 }
 
 XgmiBackendSession* XgmiBackend::GetOrCreateSessionCached(const MemoryDesc& local,
@@ -1271,6 +1283,7 @@ XgmiBackendSession* XgmiBackend::GetOrCreateSessionCached(const MemoryDesc& loca
       std::make_unique<XgmiBackendSession>(config, localAddr, remoteAddr, localDevice, remoteDevice,
                                            ipcSession, this, streamPool.get(), eventPool.get());
 
+  sess->hiddenRemote = !visibleRemote.has_value();
   XgmiBackendSession* rawPtr = sess.get();
   sessionCache[key] = std::move(sess);
 

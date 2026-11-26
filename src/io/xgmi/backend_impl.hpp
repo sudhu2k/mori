@@ -70,6 +70,10 @@ class XgmiBackendSession : public BackendSession {
     size_t localOff, remoteOff, sz, rows, localPitch, remotePitch;
   };
 
+  // The remote GPU is not visible to this process: its memory is IPC-mapped on localDevice and
+  // remoteDevice is set to localDevice. It is still another GPU's memory.
+  bool hiddenRemote{false};
+
  private:
   void IssueBatch(const SizeVec& localOffsets, const SizeVec& remoteOffsets, const SizeVec& sizes,
                   std::vector<Rect> rects, TransferStatus* status, TransferUniqueId id,
